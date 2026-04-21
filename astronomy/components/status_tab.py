@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QPlainTextEdit,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -47,6 +48,19 @@ class StatusTab(QWidget):
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(12)
+
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("statusScrollArea")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(12)
+
+        scroll_area.setWidget(scroll_content)
 
         # Status card summarising the latest ephemeris sample.
         status_card = QFrame()
@@ -132,7 +146,7 @@ class StatusTab(QWidget):
         self.window.reasons_summary.setWordWrap(True)
         status_layout.addWidget(self.window.reasons_summary)
 
-        outer_layout.addWidget(status_card)
+        scroll_layout.addWidget(status_card)
 
         log_card = QFrame()
         log_card.setObjectName("cardFrame")
@@ -146,4 +160,5 @@ class StatusTab(QWidget):
         self.window.log_view.setMaximumBlockCount(0)
         self.window.log_view.setMinimumHeight(180)
         log_layout.addWidget(self.window.log_view)
-        outer_layout.addWidget(log_card, 1)
+        scroll_layout.addWidget(log_card, 1)
+        outer_layout.addWidget(scroll_area, 1)

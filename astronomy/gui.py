@@ -1068,8 +1068,8 @@ class AstronomyTrackerWindow(QMainWindow):
         self.elevation_plot.setLimits(
             yMin=-90.0, yMax=90.0, minYRange=180.0, maxYRange=180.0
         )
-        self.elevation_plot.setMinimumHeight(185)
-        self.elevation_plot.setMaximumHeight(185)
+        self.elevation_plot.setMinimumHeight(150)
+        self.elevation_plot.setMaximumHeight(150)
         self.elevation_plot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -1102,8 +1102,8 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuth_plot.setLimits(
             yMin=0.0, yMax=360.0, minYRange=360.0, maxYRange=360.0
         )
-        self.azimuth_plot.setMinimumHeight(185)
-        self.azimuth_plot.setMaximumHeight(185)
+        self.azimuth_plot.setMinimumHeight(150)
+        self.azimuth_plot.setMaximumHeight(150)
         self.azimuth_plot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -1136,8 +1136,8 @@ class AstronomyTrackerWindow(QMainWindow):
         self.score_plot.setLimits(
             yMin=0.0, yMax=100.0, minYRange=100.0, maxYRange=100.0
         )
-        self.score_plot.setMinimumHeight(165)
-        self.score_plot.setMaximumHeight(165)
+        self.score_plot.setMinimumHeight(130)
+        self.score_plot.setMaximumHeight(130)
         self.score_plot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -1174,8 +1174,8 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_plot.setLimits(
             yMin=0.0, yMax=100.0, minYRange=100.0, maxYRange=100.0
         )
-        self.weather_plot.setMinimumHeight(160)
-        self.weather_plot.setMaximumHeight(160)
+        self.weather_plot.setMinimumHeight(120)
+        self.weather_plot.setMaximumHeight(120)
         self.weather_plot.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )

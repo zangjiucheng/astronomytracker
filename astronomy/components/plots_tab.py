@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QPushButton, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class PlotsTab(QWidget):
@@ -19,6 +26,19 @@ class PlotsTab(QWidget):
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(10)
+
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("plotScrollArea")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(10)
+
+        scroll_area.setWidget(scroll_content)
 
         chart_log_splitter = QSplitter(Qt.Orientation.Vertical)
         chart_log_splitter.setObjectName("chartLogSplitter")
@@ -59,7 +79,8 @@ class PlotsTab(QWidget):
 
         chart_log_splitter.addWidget(plot_card)
 
-        outer_layout.addWidget(chart_log_splitter, 1)
+        scroll_layout.addWidget(chart_log_splitter, 1)
+        outer_layout.addWidget(scroll_area, 1)
 
     def _reset_sky(self) -> None:
         self.window.sky_plot.setXRange(-1.1, 1.1)
