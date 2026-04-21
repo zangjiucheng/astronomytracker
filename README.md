@@ -107,3 +107,4 @@ See `target_command.md` for examples and formatting rules.
 ## Credits
 - JPL Horizons: https://ssd.jpl.nasa.gov/horizons/
 - IP Geolocation: https://ipinfo.io/
+- Weather Data: https://open-meteo.com/
