@@ -79,6 +79,7 @@ APP_CONFIG = TrackerAppConfig(
     header_title="My Target Real-Time Tracker",
     header_subtitle="PySide6 desktop tracker with live JPL Horizons sampling.",
     target_name="My Target",
+  scorer_target_type="deep_sky",  # or: near_solar_comet / planet / default
 )
 
 INITIAL_STATE = TrackerState(

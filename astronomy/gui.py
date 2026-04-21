@@ -10,7 +10,7 @@ from typing import Callable
 
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDoubleSpinBox,
@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
 )
 
 from astronomy.api_fetcher import HorizonsFetcher
+from astronomy.observation_scorer import ObservationContext, ObservationScoreResult
+from astronomy.scorer_factory import create_scorer
 from astronomy.tracker_state import EphemerisSample, ObserverLocation, TrackerState, format_local_time
 
 pg.setConfigOptions(antialias=True)
@@ -46,6 +48,7 @@ class TrackerAppConfig:
         "PySide6 desktop tracker with live JPL Horizons sampling, historical log, and azimuth/elevation plot."
     )
     target_name: str = "Target"
+    scorer_target_type: str = "default"
 
 
 class RequestThread(QThread):
@@ -119,15 +122,18 @@ class AstronomyTrackerWindow(QMainWindow):
         self.timestamps: deque[float] = deque(maxlen=self.plot_limit)
         self.azimuths: deque[float] = deque(maxlen=self.plot_limit)
         self.elevations: deque[float] = deque(maxlen=self.plot_limit)
+        self.observation_scores: deque[float] = deque(maxlen=self.plot_limit)
         self.prediction_horizon_minutes = 24 * 60
         self.prediction_step_minutes = 1
         self.prediction_refresh_seconds = 300
         self.follow_live_projection = True
         self.predicted_samples: list[EphemerisSample] = []
+        self.predicted_observation_scores: list[float] = []
         self.last_prediction_anchor_utc: datetime | None = None
         self.tracking_thread: TrackingThread | None = None
         self.pending_request_thread: RequestThread | None = None
         self.prediction_request_thread: RequestThread | None = None
+        self.active_scorer = create_scorer(self.config.scorer_target_type)
 
         self.setWindowTitle(self.config.window_title)
         self.resize(1320, 860)
@@ -333,8 +339,11 @@ class AstronomyTrackerWindow(QMainWindow):
         self.indicator_dot.setFixedSize(16, 16)
         self.indicator_dot.setObjectName("indicatorDot")
 
-        self.visibility_summary = QLabel("Below horizon")
+        self.visibility_summary = QLabel("Not observable")
         self.visibility_summary.setObjectName("statusValueLabel")
+
+        self.score_summary = QLabel("Score 0/100")
+        self.score_summary.setObjectName("mutedLabel")
 
         self.status_detail = QLabel("Waiting for data")
         self.status_detail.setWordWrap(True)
@@ -343,6 +352,7 @@ class AstronomyTrackerWindow(QMainWindow):
         status_summary_layout = QVBoxLayout()
         status_summary_layout.setSpacing(3)
         status_summary_layout.addWidget(self.visibility_summary)
+        status_summary_layout.addWidget(self.score_summary)
         status_summary_layout.addWidget(self.status_detail)
 
         top_row.addWidget(self.indicator_dot, 0, Qt.AlignmentFlag.AlignTop)
@@ -365,7 +375,9 @@ class AstronomyTrackerWindow(QMainWindow):
             ("Elevation", "el_deg"),
             ("Solar Elongation", "solar_elong_deg"),
             ("Compass", "compass_direction"),
-            ("Visibility", "visibility_status"),
+            ("Observation Score", "obs_score"),
+            ("Observation Grade", "obs_grade"),
+            ("Limiting Factor", "obs_limiting"),
         ]
 
         for index, (label_text, key) in enumerate(fields):
@@ -376,6 +388,12 @@ class AstronomyTrackerWindow(QMainWindow):
             metrics_grid.addWidget(card, row, col)
 
         status_layout.addLayout(metrics_grid)
+
+        self.reasons_summary = QLabel("Reasons: waiting for data")
+        self.reasons_summary.setObjectName("mutedLabel")
+        self.reasons_summary.setWordWrap(True)
+        status_layout.addWidget(self.reasons_summary)
+
         layout.addWidget(status_card)
 
         chart_log_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -396,8 +414,8 @@ class AstronomyTrackerWindow(QMainWindow):
         self.sky_plot.hideAxis("bottom")
         self.sky_plot.setAspectLocked(True)
         self.sky_plot.setMouseEnabled(x=False, y=False)
-        self.sky_plot.setXRange(-1.1, 1.1, padding=0)
-        self.sky_plot.setYRange(-1.1, 1.1, padding=0)
+        self.sky_plot.setXRange(-1.1, 1.1)
+        self.sky_plot.setYRange(-1.1, 1.1)
         self.sky_plot.setMinimumHeight(250)
         self.sky_plot.setMaximumHeight(250)
         self.sky_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -413,7 +431,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.elevation_plot.setLabel("bottom", "UTC time")
         self.elevation_plot.setYRange(-90.0, 90.0)
         self.elevation_plot.setMouseEnabled(x=True, y=False)
-        self.elevation_plot.getPlotItem().enableAutoRange(x=True, y=False)
+        self.elevation_plot.enableAutoRange(x=True, y=False)
         self.elevation_plot.setLimits(yMin=-90.0, yMax=90.0, minYRange=180.0, maxYRange=180.0)
         self.elevation_plot.setMinimumHeight(185)
         self.elevation_plot.setMaximumHeight(185)
@@ -439,7 +457,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuth_plot.setLabel("bottom", "UTC time")
         self.azimuth_plot.setYRange(0.0, 360.0)
         self.azimuth_plot.setMouseEnabled(x=True, y=False)
-        self.azimuth_plot.getPlotItem().enableAutoRange(x=True, y=False)
+        self.azimuth_plot.enableAutoRange(x=True, y=False)
         self.azimuth_plot.setLimits(yMin=0.0, yMax=360.0, minYRange=360.0, maxYRange=360.0)
         self.azimuth_plot.setMinimumHeight(185)
         self.azimuth_plot.setMaximumHeight(185)
@@ -458,10 +476,42 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuth_plot.addItem(self.azimuth_cursor)
 
         self.azimuth_plot.setXLink(self.elevation_plot)
+
+        self.score_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        self.score_plot.setBackground("#07111f")
+        self.score_plot.showGrid(x=True, y=True, alpha=0.18)
+        self.score_plot.setLabel("left", "Observation Score")
+        self.score_plot.setLabel("bottom", "UTC time")
+        self.score_plot.setYRange(0.0, 100.0)
+        self.score_plot.setMouseEnabled(x=True, y=False)
+        self.score_plot.enableAutoRange(x=True, y=False)
+        self.score_plot.setLimits(yMin=0.0, yMax=100.0, minYRange=100.0, maxYRange=100.0)
+        self.score_plot.setMinimumHeight(165)
+        self.score_plot.setMaximumHeight(165)
+        self.score_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.score_curve = self.score_plot.plot(pen=pg.mkPen("#94a3b8", width=1.4), name="Score")
+        self.score_prediction_curve = self.score_plot.plot(
+            pen=pg.mkPen("#60a5fa", width=1.8, style=Qt.PenStyle.DashLine),
+            name="Score Forecast",
+        )
+        self.score_scatter = pg.ScatterPlotItem(size=8)
+        self.score_plot.addItem(self.score_scatter)
+        self.score_prediction_scatter = pg.ScatterPlotItem(size=7)
+        self.score_plot.addItem(self.score_prediction_scatter)
+        self.score_cursor = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen("#22c55e", width=1.1, style=Qt.PenStyle.DashLine),
+        )
+        self.score_cursor.setVisible(False)
+        self.score_plot.addItem(self.score_cursor)
+        self.score_plot.setXLink(self.elevation_plot)
+
         self._set_initial_plot_time_window()
 
         plot_layout.addWidget(self.elevation_plot)
         plot_layout.addWidget(self.azimuth_plot)
+        plot_layout.addWidget(self.score_plot)
 
         log_card = QFrame()
         log_card.setObjectName("cardFrame")
@@ -968,7 +1018,70 @@ class AstronomyTrackerWindow(QMainWindow):
         self.back_to_live_button.setEnabled(False)
         self._update_timeline_selection(0)
 
-    def _render_sample_fields(self, sample: EphemerisSample) -> None:
+    def _estimate_sun_altitude(self, sample: EphemerisSample) -> float:
+        token = sample.solar_presence.upper()
+        if "*" in token:
+            return 10.0
+        if "C" in token:
+            return -3.0
+        if "N" in token:
+            return -9.0
+        if "A" in token:
+            return -15.0
+        return -25.0
+
+    def _estimate_moon_context(self, sample: EphemerisSample) -> tuple[float, float, float]:
+        marker = sample.interferer_presence.lower()
+        if "m" in marker:
+            # Horizons compact flags do not include full moon geometry in this request.
+            # Use a conservative placeholder to penalize score when moon interference is flagged.
+            return 20.0, 0.7, 35.0
+        return -90.0, 0.0, 180.0
+
+    def _build_observation_context(self, sample: EphemerisSample) -> ObservationContext:
+        moon_alt, moon_illumination, moon_separation = self._estimate_moon_context(sample)
+        return ObservationContext(
+            target_alt=sample.el_deg,
+            sun_alt=self._estimate_sun_altitude(sample),
+            solar_elongation=sample.solar_elong_deg,
+            moon_alt=moon_alt,
+            moon_illumination=moon_illumination,
+            moon_separation=moon_separation,
+            cloud_cover=None,
+            bortle=None,
+            azimuth=sample.az_deg,
+            magnitude=None,
+            target_name=self.config.target_name,
+        )
+
+    def _evaluate_observation(self, sample: EphemerisSample) -> ObservationScoreResult:
+        return self.active_scorer.evaluate(self._build_observation_context(sample))
+
+    def _score_color(self, score: float) -> QColor:
+        score_01 = max(0.0, min(1.0, score / 100.0))
+        anchors = [
+            (0.0, QColor("#ef4444")),
+            (0.5, QColor("#f59e0b")),
+            (0.75, QColor("#84cc16")),
+            (1.0, QColor("#14b8a6")),
+        ]
+
+        for idx in range(1, len(anchors)):
+            left_pos, left_color = anchors[idx - 1]
+            right_pos, right_color = anchors[idx]
+            if score_01 <= right_pos:
+                segment = (score_01 - left_pos) / max(1e-6, right_pos - left_pos)
+                red = int(round(left_color.red() + segment * (right_color.red() - left_color.red())))
+                green = int(round(left_color.green() + segment * (right_color.green() - left_color.green())))
+                blue = int(round(left_color.blue() + segment * (right_color.blue() - left_color.blue())))
+                return QColor(red, green, blue)
+
+        return anchors[-1][1]
+
+    def _render_sample_fields(self, sample: EphemerisSample, score_result: ObservationScoreResult | None = None) -> None:
+        if score_result is None:
+            score_result = self._evaluate_observation(sample)
+
         self.value_labels["utc_time"].setText(sample.utc_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
         self.value_labels["local_time"].setText(format_local_time(sample.utc_time))
         self.value_labels["ra_deg"].setText(f"{sample.ra_deg:.6f} deg")
@@ -977,8 +1090,17 @@ class AstronomyTrackerWindow(QMainWindow):
         self.value_labels["el_deg"].setText(f"{sample.el_deg:.3f} deg")
         self.value_labels["solar_elong_deg"].setText(f"{sample.solar_elong_deg:.3f} deg")
         self.value_labels["compass_direction"].setText(sample.compass_direction)
-        self.value_labels["visibility_status"].setText(sample.visibility_status)
-        self._set_indicator(sample.el_deg, sample.visibility_status)
+        self.value_labels["obs_score"].setText(f"{score_result.score}/100")
+        self.value_labels["obs_grade"].setText(score_result.status)
+        self.value_labels["obs_limiting"].setText(score_result.limiting_factor or "-")
+
+        if score_result.reasons:
+            reason_text = "; ".join(score_result.reasons[:3])
+        else:
+            reason_text = "No major limiting reason detected"
+        self.reasons_summary.setText(f"Reasons: {reason_text}")
+
+        self._set_indicator(score_result)
 
     def _set_plot_cursor(self, sample: EphemerisSample, *, preview: bool) -> None:
         timestamp = sample.utc_time.timestamp()
@@ -986,27 +1108,44 @@ class AstronomyTrackerWindow(QMainWindow):
         pen = pg.mkPen(color, width=1.2, style=Qt.PenStyle.DashLine)
         self.elevation_cursor.setPen(pen)
         self.azimuth_cursor.setPen(pen)
+        self.score_cursor.setPen(pen)
         self.elevation_cursor.setPos(timestamp)
         self.azimuth_cursor.setPos(timestamp)
+        self.score_cursor.setPos(timestamp)
         self.elevation_cursor.setVisible(True)
         self.azimuth_cursor.setVisible(True)
+        self.score_cursor.setVisible(True)
 
     def _set_initial_plot_time_window(self) -> None:
         now_ts = datetime.now(timezone.utc).timestamp()
         half_window_sec = 30 * 60
-        self.elevation_plot.setXRange(now_ts - half_window_sec, now_ts + half_window_sec, padding=0)
+        self.elevation_plot.setXRange(now_ts - half_window_sec, now_ts + half_window_sec)
 
     def _update_prediction_plot_curves(self) -> None:
         if not self.predicted_samples:
             self.el_prediction_curve.setData([], [])
             self.az_prediction_curve.setData([], [])
+            self.score_prediction_curve.setData([], [])
+            self.score_prediction_scatter.setData([], [])
+            self.predicted_observation_scores = []
             return
 
         pred_timestamps = [row.utc_time.timestamp() for row in self.predicted_samples]
         pred_elevations = [row.el_deg for row in self.predicted_samples]
         pred_azimuths = [row.az_deg for row in self.predicted_samples]
+        self.predicted_observation_scores = [float(self._evaluate_observation(row).score) for row in self.predicted_samples]
         self.el_prediction_curve.setData(pred_timestamps, pred_elevations)
         self.az_prediction_curve.setData(pred_timestamps, pred_azimuths)
+        self.score_prediction_curve.setData(pred_timestamps, self.predicted_observation_scores)
+
+        forecast_brushes = [pg.mkBrush(self._score_color(score)) for score in self.predicted_observation_scores]
+        self.score_prediction_scatter.setData(
+            x=pred_timestamps,
+            y=self.predicted_observation_scores,
+            brush=forecast_brushes,
+            pen=pg.mkPen("#0f172a", width=0.7),
+            size=7,
+        )
 
     def _update_timeline_selection(self, offset_minutes: int) -> None:
         if self.state.latest_sample is None:
@@ -1045,12 +1184,14 @@ class AstronomyTrackerWindow(QMainWindow):
         self.log_view.setTextCursor(cursor)
         self.log_view.ensureCursorVisible()
 
-    def _set_indicator(self, elevation_deg: float, visibility_text: str) -> None:
-        color = "#22c55e" if elevation_deg > 0 else "#ef4444"
+    def _set_indicator(self, score_result: ObservationScoreResult) -> None:
+        color = self._score_color(float(score_result.score))
         self.indicator_dot.setStyleSheet(
-            f"background: {color}; border-radius: 9px; border: 1px solid #1f2937;"
+            f"background: {color.name()}; border-radius: 9px; border: 1px solid #1f2937;"
         )
-        self.visibility_summary.setText(visibility_text)
+        limiting = score_result.limiting_factor or "none"
+        self.visibility_summary.setText(score_result.status)
+        self.score_summary.setText(f"Score {score_result.score}/100 | Limiting: {limiting}")
 
     def _update_sample_display(self, sample: EphemerisSample) -> None:
         self.state.latest_sample = sample
@@ -1058,10 +1199,12 @@ class AstronomyTrackerWindow(QMainWindow):
         if len(self.state.history) > 1000:
             self.state.history.pop(0)
 
+        score_result = self._evaluate_observation(sample)
+
         if self.follow_live_projection:
-            self._render_sample_fields(sample)
+            self._render_sample_fields(sample, score_result)
             self._set_plot_cursor(sample, preview=False)
-        self._update_plot(sample)
+        self._update_plot(sample, score_result)
         self._update_sky_projection(sample)
         if self._should_refresh_prediction(sample):
             self._request_prediction_trajectory(sample.utc_time)
@@ -1072,18 +1215,29 @@ class AstronomyTrackerWindow(QMainWindow):
             f"RA {sample.ra_deg:.6f} deg | Dec {sample.dec_deg:.6f} deg | "
             f"Az {sample.az_deg:.3f} deg ({sample.compass_direction}) | "
             f"El {sample.el_deg:.3f} deg | S-O-T {sample.solar_elong_deg:.3f} deg | "
-            f"{sample.visibility_status}"
+            f"Score {score_result.score}/100 ({score_result.status})"
         )
         self._append_log(log_line)
         self._update_status_banner(f"Latest sample updated at {sample.utc_time.strftime('%H:%M:%S UTC')}.")
 
-    def _update_plot(self, sample: EphemerisSample) -> None:
+    def _update_plot(self, sample: EphemerisSample, score_result: ObservationScoreResult) -> None:
         timestamp = sample.utc_time.timestamp()
         self.timestamps.append(timestamp)
         self.azimuths.append(sample.az_deg)
         self.elevations.append(sample.el_deg)
+        self.observation_scores.append(float(score_result.score))
         self.az_curve.setData(list(self.timestamps), list(self.azimuths))
         self.el_curve.setData(list(self.timestamps), list(self.elevations))
+        self.score_curve.setData(list(self.timestamps), list(self.observation_scores))
+
+        brushes = [pg.mkBrush(self._score_color(score)) for score in self.observation_scores]
+        self.score_scatter.setData(
+            x=list(self.timestamps),
+            y=list(self.observation_scores),
+            brush=brushes,
+            pen=pg.mkPen("#0f172a", width=0.8),
+            size=8,
+        )
 
     def _set_error_state(self, message: str) -> None:
         self.state.last_error = message

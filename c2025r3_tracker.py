@@ -9,6 +9,7 @@ APP_CONFIG = TrackerAppConfig(
     header_title="C/2025 R3 (PanSTARRS) Real-Time Tracker",
     header_subtitle="PySide6 desktop tracker with live JPL Horizons sampling, historical log, and azimuth/elevation plot.",
     target_name="C/2025 R3 (PanSTARRS)",
+    scorer_target_type="near_solar_comet",
 )
 
 INITIAL_STATE = TrackerState(
