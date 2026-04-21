@@ -9,7 +9,7 @@ APP_CONFIG = TrackerAppConfig(
     header_title="Moon Real-Time Tracker",
     header_subtitle="PySide6 desktop tracker with live JPL Horizons sampling, historical log, and azimuth/elevation plot.",
     target_name="Moon",
-    scorer_target_type="planet",
+    scorer_target_type="moon",
 )
 
 INITIAL_STATE = TrackerState(

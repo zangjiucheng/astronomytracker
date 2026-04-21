@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass, field
 from typing import Optional
 
-
-def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, x))
+from astronomy.math_utils import clamp
+from astronomy.weather import score_weather, score_weather_components
 
 
 @dataclass
@@ -19,7 +18,15 @@ class ObservationContext:
     moon_illumination: float = 0.0
     moon_separation: float = 180.0
 
-    cloud_cover: Optional[float] = None
+    cloud_cover: float = 0.0
+    humidity: float = 55.0
+    visibility_km: float = 15.0
+    wind_speed: float = 8.0
+    temperature: float = 10.0
+    dew_point: float = 2.0
+    seeing_arcsec: Optional[float] = None
+    transparency: Optional[float] = None
+
     bortle: Optional[float] = None
 
     azimuth: Optional[float] = None
@@ -39,6 +46,14 @@ class ObservationScoreResult:
 
 
 class BaseObservationScorer(ABC):
+    SCORE_WEIGHTS: dict[str, float] = {
+        "sun": 0.25,
+        "alt": 0.20,
+        "elong": 0.15,
+        "moon": 0.15,
+        "weather": 0.25,
+    }
+
     """
     Abstract base scorer for astronomical observation conditions.
 
@@ -97,7 +112,7 @@ class BaseObservationScorer(ABC):
             "alt": self.score_alt(ctx),
             "elong": self.score_elongation(ctx),
             "moon": self.score_moon(ctx),
-            "env": self.score_environment(ctx),
+            "weather": self.score_weather(ctx),
         }
 
     def compute_custom_scores(
@@ -117,12 +132,34 @@ class BaseObservationScorer(ABC):
         _ = (ctx, subscores, final_score)
         return {}
 
-    @abstractmethod
     def combine_subscores(self, subscores: dict[str, float], ctx: ObservationContext) -> float:
         """
         Return a raw score in [0, 100].
+
+        Default implementation uses parameterized weight maps.
         """
-        raise NotImplementedError
+        weights = self.get_score_weights(ctx, subscores)
+        return self._weighted_score(subscores, weights)
+
+    def get_score_weights(self, ctx: ObservationContext, subscores: dict[str, float]) -> dict[str, float]:
+        _ = (ctx, subscores)
+        return dict(self.SCORE_WEIGHTS)
+
+    def _weighted_score(self, subscores: dict[str, float], weights: dict[str, float]) -> float:
+        if not weights:
+            return 0.0
+
+        total_weight = sum(weights.values())
+        if total_weight <= 0.0:
+            return 0.0
+
+        weighted_sum = 0.0
+        for key, weight in weights.items():
+            if key not in subscores:
+                raise ValueError(f"Missing subscore '{key}' required by weight map")
+            weighted_sum += weight * subscores[key]
+
+        return 100.0 * (weighted_sum / total_weight)
 
     def score_sun(self, ctx: ObservationContext) -> float:
         sun_alt = ctx.sun_alt
@@ -167,9 +204,12 @@ class BaseObservationScorer(ABC):
         return clamp(1.0 - penalty)
 
     def score_environment(self, ctx: ObservationContext) -> float:
-        cloud_score = 1.0 if ctx.cloud_cover is None else clamp(1.0 - ctx.cloud_cover / 100.0)
+        cloud_score = clamp(1.0 - ctx.cloud_cover / 100.0)
         lp_score = 1.0 if ctx.bortle is None else clamp(1.0 - (ctx.bortle - 1.0) / 8.0)
         return 0.7 * cloud_score + 0.3 * lp_score
+
+    def score_weather(self, ctx: ObservationContext) -> float:
+        return score_weather(ctx)
 
     def score_to_status(self, score: int) -> str:
         if score <= 15:
@@ -194,112 +234,30 @@ class BaseObservationScorer(ABC):
             reasons.append("Target is too low above the horizon")
         if subscores["moon"] < 0.5:
             reasons.append("Moonlight interference is significant")
-        if subscores["env"] < 0.5:
-            reasons.append("Cloud cover or light pollution is limiting visibility")
+
+        weather_parts = score_weather_components(ctx)
+        if weather_parts["cloud"] < 0.45:
+            reasons.append("Cloud cover is limiting visibility")
+        if weather_parts["humidity"] < 0.5:
+            reasons.append("High humidity / low dew point spread causing haze")
+        if weather_parts["seeing"] < 0.45:
+            reasons.append("Poor atmospheric seeing")
+        if weather_parts["transparency"] < 0.45:
+            reasons.append("Low transparency conditions")
         return reasons
 
     def find_limiting_factor(self, subscores: dict[str, float]) -> Optional[str]:
         if not subscores:
             return None
+        if subscores.get("weather", 1.0) < 0.4:
+            return "weather conditions"
         key = min(subscores, key=lambda metric: subscores[metric])
         mapping = {
             "sun": "solar altitude / sky brightness",
             "alt": "target altitude",
             "elong": "solar elongation",
             "moon": "moonlight interference",
+            "weather": "weather conditions",
             "env": "environmental conditions",
         }
         return mapping.get(key, key)
-
-
-class NearSolarCometScorer(BaseObservationScorer):
-    """
-    Scorer specialized for near-solar comets.
-    Strongly penalizes daylight and low solar elongation.
-    """
-
-    def check_hard_gates(self, ctx: ObservationContext) -> Optional[str]:
-        if ctx.target_alt <= 0:
-            return "Target below horizon"
-        if ctx.sun_alt > 0:
-            return "Sun above horizon"
-        if ctx.solar_elongation < 8:
-            return "Target too close to the Sun"
-        return None
-
-    def combine_subscores(self, subscores: dict[str, float], ctx: ObservationContext) -> float:
-        return 100.0 * (
-            0.35 * subscores["sun"]
-            + 0.25 * subscores["elong"]
-            + 0.20 * subscores["alt"]
-            + 0.10 * subscores["moon"]
-            + 0.10 * subscores["env"]
-        )
-
-
-class DeepSkyScorer(BaseObservationScorer):
-    """
-    Scorer for galaxies, nebulae, clusters, and other deep-sky objects.
-    """
-
-    def check_hard_gates(self, ctx: ObservationContext) -> Optional[str]:
-        if ctx.target_alt <= 0:
-            return "Target below horizon"
-        if ctx.sun_alt > -6:
-            return "Sky too bright for deep-sky observation"
-        return None
-
-    def score_environment(self, ctx: ObservationContext) -> float:
-        # Deep-sky viewing is very sensitive to light pollution.
-        cloud_score = 1.0 if ctx.cloud_cover is None else clamp(1.0 - ctx.cloud_cover / 100.0)
-        lp_score = 1.0 if ctx.bortle is None else clamp(1.0 - (ctx.bortle - 1.0) / 8.0)
-        return 0.45 * cloud_score + 0.55 * lp_score
-
-    def combine_subscores(self, subscores: dict[str, float], ctx: ObservationContext) -> float:
-        return 100.0 * (
-            0.35 * subscores["sun"]
-            + 0.20 * subscores["alt"]
-            + 0.05 * subscores["elong"]
-            + 0.20 * subscores["moon"]
-            + 0.20 * subscores["env"]
-        )
-
-    def build_reasons(self, ctx: ObservationContext, subscores: dict[str, float]) -> list[str]:
-        reasons = super().build_reasons(ctx, subscores)
-        if ctx.sun_alt > -12:
-            reasons.append("Deep-sky observation benefits from astronomical darkness")
-        return reasons
-
-
-class PlanetScorer(BaseObservationScorer):
-    """
-    Scorer for bright planets.
-    Planets are more tolerant of twilight and some moonlight.
-    """
-
-    def check_hard_gates(self, ctx: ObservationContext) -> Optional[str]:
-        if ctx.target_alt <= 0:
-            return "Target below horizon"
-        if ctx.sun_alt > 5:
-            return "Daylight too strong for practical observation"
-        return None
-
-    def combine_subscores(self, subscores: dict[str, float], ctx: ObservationContext) -> float:
-        return 100.0 * (
-            0.20 * subscores["sun"]
-            + 0.35 * subscores["alt"]
-            + 0.15 * subscores["elong"]
-            + 0.10 * subscores["moon"]
-            + 0.20 * subscores["env"]
-        )
-
-
-class BaseFallbackScorer(BaseObservationScorer):
-    def combine_subscores(self, subscores: dict[str, float], ctx: ObservationContext) -> float:
-        return 100.0 * (
-            0.30 * subscores["sun"]
-            + 0.25 * subscores["alt"]
-            + 0.20 * subscores["elong"]
-            + 0.15 * subscores["moon"]
-            + 0.10 * subscores["env"]
-        )

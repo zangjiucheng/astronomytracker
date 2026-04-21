@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Callable
 
-from astronomy.observation_scorer import (
+from astronomy.observation_scorer import BaseObservationScorer
+from astronomy.scorers import (
     BaseFallbackScorer,
-    BaseObservationScorer,
     DeepSkyScorer,
+    MoonScorer,
     NearSolarCometScorer,
     PlanetScorer,
 )
@@ -18,6 +19,7 @@ _SCORER_REGISTRY: dict[str, ScorerFactory] = {
     "near_solar_comet": NearSolarCometScorer,
     "deep_sky": DeepSkyScorer,
     "planet": PlanetScorer,
+    "moon": MoonScorer,
 }
 
 

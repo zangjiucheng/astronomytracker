@@ -123,16 +123,22 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuths: deque[float] = deque(maxlen=self.plot_limit)
         self.elevations: deque[float] = deque(maxlen=self.plot_limit)
         self.observation_scores: deque[float] = deque(maxlen=self.plot_limit)
+        self.weather_scores: deque[float] = deque(maxlen=self.plot_limit)
         self.prediction_horizon_minutes = 24 * 60
         self.prediction_step_minutes = 1
         self.prediction_refresh_seconds = 300
         self.follow_live_projection = True
         self.predicted_samples: list[EphemerisSample] = []
         self.predicted_observation_scores: list[float] = []
+        self.predicted_weather_scores: list[float] = []
         self.last_prediction_anchor_utc: datetime | None = None
+        self.weather_refresh_seconds = 2 * 60
+        self.last_weather_update_utc: datetime | None = None
+        self.latest_weather: dict[str, float | None] | None = None
         self.tracking_thread: TrackingThread | None = None
         self.pending_request_thread: RequestThread | None = None
         self.prediction_request_thread: RequestThread | None = None
+        self.weather_request_thread: RequestThread | None = None
         self.active_scorer = create_scorer(self.config.scorer_target_type)
 
         self.setWindowTitle(self.config.window_title)
@@ -378,6 +384,10 @@ class AstronomyTrackerWindow(QMainWindow):
             ("Observation Score", "obs_score"),
             ("Observation Grade", "obs_grade"),
             ("Limiting Factor", "obs_limiting"),
+            ("Cloud Cover", "weather_cloud"),
+            ("Humidity", "weather_humidity"),
+            ("Wind", "weather_wind"),
+            ("Visibility", "weather_visibility"),
         ]
 
         for index, (label_text, key) in enumerate(fields):
@@ -507,11 +517,42 @@ class AstronomyTrackerWindow(QMainWindow):
         self.score_plot.addItem(self.score_cursor)
         self.score_plot.setXLink(self.elevation_plot)
 
+        self.weather_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        self.weather_plot.setBackground("#07111f")
+        self.weather_plot.showGrid(x=True, y=True, alpha=0.18)
+        self.weather_plot.setLabel("left", "Weather Score")
+        self.weather_plot.setLabel("bottom", "UTC time")
+        self.weather_plot.setYRange(0.0, 100.0)
+        self.weather_plot.setMouseEnabled(x=True, y=False)
+        self.weather_plot.enableAutoRange(x=True, y=False)
+        self.weather_plot.setLimits(yMin=0.0, yMax=100.0, minYRange=100.0, maxYRange=100.0)
+        self.weather_plot.setMinimumHeight(160)
+        self.weather_plot.setMaximumHeight(160)
+        self.weather_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.weather_curve = self.weather_plot.plot(pen=pg.mkPen("#38bdf8", width=1.4), name="Weather")
+        self.weather_prediction_curve = self.weather_plot.plot(
+            pen=pg.mkPen("#22d3ee", width=1.8, style=Qt.PenStyle.DashLine),
+            name="Weather Forecast",
+        )
+        self.weather_scatter = pg.ScatterPlotItem(size=8)
+        self.weather_plot.addItem(self.weather_scatter)
+        self.weather_prediction_scatter = pg.ScatterPlotItem(size=7)
+        self.weather_plot.addItem(self.weather_prediction_scatter)
+        self.weather_cursor = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen("#22c55e", width=1.1, style=Qt.PenStyle.DashLine),
+        )
+        self.weather_cursor.setVisible(False)
+        self.weather_plot.addItem(self.weather_cursor)
+        self.weather_plot.setXLink(self.elevation_plot)
+
         self._set_initial_plot_time_window()
 
         plot_layout.addWidget(self.elevation_plot)
         plot_layout.addWidget(self.azimuth_plot)
         plot_layout.addWidget(self.score_plot)
+        plot_layout.addWidget(self.weather_plot)
 
         log_card = QFrame()
         log_card.setObjectName("cardFrame")
@@ -614,6 +655,28 @@ class AstronomyTrackerWindow(QMainWindow):
         elapsed = (sample.utc_time - self.last_prediction_anchor_utc).total_seconds()
         return elapsed >= self.prediction_refresh_seconds
 
+    def _should_refresh_weather(self, sample: EphemerisSample) -> bool:
+        if self.last_weather_update_utc is None:
+            return True
+        elapsed = (sample.utc_time - self.last_weather_update_utc).total_seconds()
+        return elapsed >= self.weather_refresh_seconds
+
+    def _request_weather_update(self, anchor_time: datetime) -> None:
+        _ = anchor_time
+        if self.weather_request_thread and self.weather_request_thread.isRunning():
+            return
+
+        location = self.state.location
+
+        def action() -> dict[str, float | None]:
+            return self.fetcher.fetch_open_meteo_weather(location)
+
+        thread = RequestThread(action, self)
+        self.weather_request_thread = thread
+        thread.result_ready.connect(self._handle_weather_result)
+        thread.error_occurred.connect(self._handle_weather_error)
+        thread.start()
+
     def _request_prediction_trajectory(self, anchor_time: datetime) -> None:
         if self.prediction_request_thread and self.prediction_request_thread.isRunning():
             return
@@ -663,6 +726,47 @@ class AstronomyTrackerWindow(QMainWindow):
     @Slot(str)
     def _handle_prediction_error(self, message: str) -> None:
         self._append_log(f"[WARN] Prediction update failed: {message}")
+
+    @Slot(object)
+    def _handle_weather_result(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            self._append_log("[WARN] Unexpected weather payload.")
+            return
+
+        self.latest_weather = {
+            "cloud_cover": float(payload["cloud_cover"]) if payload.get("cloud_cover") is not None else None,
+            "humidity": float(payload["humidity"]) if payload.get("humidity") is not None else None,
+            "visibility_km": float(payload["visibility_km"]) if payload.get("visibility_km") is not None else None,
+            "wind_speed": float(payload["wind_speed"]) if payload.get("wind_speed") is not None else None,
+            "temperature": float(payload["temperature"]) if payload.get("temperature") is not None else None,
+            "dew_point": float(payload["dew_point"]) if payload.get("dew_point") is not None else None,
+            "seeing_arcsec": float(payload["seeing_arcsec"]) if payload.get("seeing_arcsec") is not None else None,
+            "transparency": float(payload["transparency"]) if payload.get("transparency") is not None else None,
+        }
+        self.last_weather_update_utc = datetime.now(timezone.utc)
+
+        cloud = self.latest_weather.get("cloud_cover")
+        humidity = self.latest_weather.get("humidity")
+        visibility = self.latest_weather.get("visibility_km")
+        wind = self.latest_weather.get("wind_speed")
+        self._append_log(
+            "Weather updated (Open-Meteo): "
+            f"cloud={cloud if cloud is not None else '-'}%, "
+            f"humidity={humidity if humidity is not None else '-'}%, "
+            f"visibility={visibility if visibility is not None else '-'}km, "
+            f"wind={wind if wind is not None else '-'}"
+        )
+
+        # Recompute displayed and forecast scores with fresh weather values.
+        if self.state.latest_sample is not None:
+            if self.follow_live_projection:
+                updated_result = self._evaluate_observation(self.state.latest_sample)
+                self._render_sample_fields(self.state.latest_sample, updated_result)
+            self._update_prediction_plot_curves()
+
+    @Slot(str)
+    def _handle_weather_error(self, message: str) -> None:
+        self._append_log(f"[WARN] Weather update failed (Open-Meteo): {message}")
 
     def _section_title(self, text: str, *, compact: bool = False) -> QLabel:
         label = QLabel(text)
@@ -1040,6 +1144,14 @@ class AstronomyTrackerWindow(QMainWindow):
 
     def _build_observation_context(self, sample: EphemerisSample) -> ObservationContext:
         moon_alt, moon_illumination, moon_separation = self._estimate_moon_context(sample)
+        weather = self.latest_weather or {}
+
+        def weather_or_default(key: str, default: float) -> float:
+            value = weather.get(key)
+            if value is None:
+                return default
+            return float(value)
+
         return ObservationContext(
             target_alt=sample.el_deg,
             sun_alt=self._estimate_sun_altitude(sample),
@@ -1047,7 +1159,14 @@ class AstronomyTrackerWindow(QMainWindow):
             moon_alt=moon_alt,
             moon_illumination=moon_illumination,
             moon_separation=moon_separation,
-            cloud_cover=None,
+            cloud_cover=weather_or_default("cloud_cover", 0.0),
+            humidity=weather_or_default("humidity", 55.0),
+            visibility_km=weather_or_default("visibility_km", 15.0),
+            wind_speed=weather_or_default("wind_speed", 8.0),
+            temperature=weather_or_default("temperature", 10.0),
+            dew_point=weather_or_default("dew_point", 2.0),
+            seeing_arcsec=weather.get("seeing_arcsec"),
+            transparency=weather.get("transparency"),
             bortle=None,
             azimuth=sample.az_deg,
             magnitude=None,
@@ -1079,8 +1198,9 @@ class AstronomyTrackerWindow(QMainWindow):
         return anchors[-1][1]
 
     def _render_sample_fields(self, sample: EphemerisSample, score_result: ObservationScoreResult | None = None) -> None:
+        ctx = self._build_observation_context(sample)
         if score_result is None:
-            score_result = self._evaluate_observation(sample)
+            score_result = self.active_scorer.evaluate(ctx)
 
         self.value_labels["utc_time"].setText(sample.utc_time.strftime("%Y-%m-%d %H:%M:%S UTC"))
         self.value_labels["local_time"].setText(format_local_time(sample.utc_time))
@@ -1093,6 +1213,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self.value_labels["obs_score"].setText(f"{score_result.score}/100")
         self.value_labels["obs_grade"].setText(score_result.status)
         self.value_labels["obs_limiting"].setText(score_result.limiting_factor or "-")
+        self.value_labels["weather_cloud"].setText(f"{ctx.cloud_cover:.0f}%")
+        self.value_labels["weather_humidity"].setText(f"{ctx.humidity:.0f}%")
+        self.value_labels["weather_wind"].setText(f"{ctx.wind_speed:.1f} km/h")
+        self.value_labels["weather_visibility"].setText(f"{ctx.visibility_km:.1f} km")
 
         if score_result.reasons:
             reason_text = "; ".join(score_result.reasons[:3])
@@ -1109,12 +1233,15 @@ class AstronomyTrackerWindow(QMainWindow):
         self.elevation_cursor.setPen(pen)
         self.azimuth_cursor.setPen(pen)
         self.score_cursor.setPen(pen)
+        self.weather_cursor.setPen(pen)
         self.elevation_cursor.setPos(timestamp)
         self.azimuth_cursor.setPos(timestamp)
         self.score_cursor.setPos(timestamp)
+        self.weather_cursor.setPos(timestamp)
         self.elevation_cursor.setVisible(True)
         self.azimuth_cursor.setVisible(True)
         self.score_cursor.setVisible(True)
+        self.weather_cursor.setVisible(True)
 
     def _set_initial_plot_time_window(self) -> None:
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -1127,22 +1254,37 @@ class AstronomyTrackerWindow(QMainWindow):
             self.az_prediction_curve.setData([], [])
             self.score_prediction_curve.setData([], [])
             self.score_prediction_scatter.setData([], [])
+            self.weather_prediction_curve.setData([], [])
+            self.weather_prediction_scatter.setData([], [])
             self.predicted_observation_scores = []
+            self.predicted_weather_scores = []
             return
 
         pred_timestamps = [row.utc_time.timestamp() for row in self.predicted_samples]
         pred_elevations = [row.el_deg for row in self.predicted_samples]
         pred_azimuths = [row.az_deg for row in self.predicted_samples]
-        self.predicted_observation_scores = [float(self._evaluate_observation(row).score) for row in self.predicted_samples]
+        prediction_results = [self._evaluate_observation(row) for row in self.predicted_samples]
+        self.predicted_observation_scores = [float(result.score) for result in prediction_results]
+        self.predicted_weather_scores = [100.0 * float(result.subscores.get("weather", 1.0)) for result in prediction_results]
         self.el_prediction_curve.setData(pred_timestamps, pred_elevations)
         self.az_prediction_curve.setData(pred_timestamps, pred_azimuths)
         self.score_prediction_curve.setData(pred_timestamps, self.predicted_observation_scores)
+        self.weather_prediction_curve.setData(pred_timestamps, self.predicted_weather_scores)
 
         forecast_brushes = [pg.mkBrush(self._score_color(score)) for score in self.predicted_observation_scores]
         self.score_prediction_scatter.setData(
             x=pred_timestamps,
             y=self.predicted_observation_scores,
             brush=forecast_brushes,
+            pen=pg.mkPen("#0f172a", width=0.7),
+            size=7,
+        )
+
+        weather_forecast_brushes = [pg.mkBrush(self._score_color(score)) for score in self.predicted_weather_scores]
+        self.weather_prediction_scatter.setData(
+            x=pred_timestamps,
+            y=self.predicted_weather_scores,
+            brush=weather_forecast_brushes,
             pen=pg.mkPen("#0f172a", width=0.7),
             size=7,
         )
@@ -1208,6 +1350,8 @@ class AstronomyTrackerWindow(QMainWindow):
         self._update_sky_projection(sample)
         if self._should_refresh_prediction(sample):
             self._request_prediction_trajectory(sample.utc_time)
+        if self._should_refresh_weather(sample):
+            self._request_weather_update(sample.utc_time)
 
         log_line = (
             f"{sample.utc_time.strftime('%Y-%m-%d %H:%M:%S UTC')} | "
@@ -1226,15 +1370,26 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuths.append(sample.az_deg)
         self.elevations.append(sample.el_deg)
         self.observation_scores.append(float(score_result.score))
+        self.weather_scores.append(100.0 * float(score_result.subscores.get("weather", 1.0)))
         self.az_curve.setData(list(self.timestamps), list(self.azimuths))
         self.el_curve.setData(list(self.timestamps), list(self.elevations))
         self.score_curve.setData(list(self.timestamps), list(self.observation_scores))
+        self.weather_curve.setData(list(self.timestamps), list(self.weather_scores))
 
         brushes = [pg.mkBrush(self._score_color(score)) for score in self.observation_scores]
         self.score_scatter.setData(
             x=list(self.timestamps),
             y=list(self.observation_scores),
             brush=brushes,
+            pen=pg.mkPen("#0f172a", width=0.8),
+            size=8,
+        )
+
+        weather_brushes = [pg.mkBrush(self._score_color(score)) for score in self.weather_scores]
+        self.weather_scatter.setData(
+            x=list(self.timestamps),
+            y=list(self.weather_scores),
+            brush=weather_brushes,
             pen=pg.mkPen("#0f172a", width=0.8),
             size=8,
         )
@@ -1314,7 +1469,12 @@ class AstronomyTrackerWindow(QMainWindow):
 
         self._set_tracking_ui(True)
         self.predicted_samples.clear()
+        self.predicted_observation_scores.clear()
+        self.predicted_weather_scores.clear()
+        self.weather_scores.clear()
         self.last_prediction_anchor_utc = None
+        self.last_weather_update_utc = None
+        self.latest_weather = None
         self.follow_live_projection = True
         self.timeline_status_label.setText("LIVE")
         self.timeline_slider.setValue(0)
