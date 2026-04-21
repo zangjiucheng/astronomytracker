@@ -284,15 +284,6 @@ class AstronomyTrackerWindow(QMainWindow):
         main_layout.addWidget(header)
         main_layout.addWidget(self.controls_panel)
         main_layout.addLayout(content_row, 1)
-
-        self._bg_pixmap = QPixmap(
-            str(
-                Path(__file__).resolve().parent / "static" / "star-space-background.jpg"
-            )
-        )
-        if not self._bg_pixmap.isNull():
-            self._rescale_bg()
-
         # Status bar initial state.
         self.statusBar().showMessage("Ready")
 
@@ -557,6 +548,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self.load_ip_button.clicked.connect(self.load_ip_location)
         self.timeline_slider.valueChanged.connect(self._on_timeline_slider_changed)
         self.back_to_live_button.clicked.connect(self._set_projection_live)
+        self.score_scatter.sigHovered.connect(self._on_score_hovered)
+        self.score_prediction_scatter.sigHovered.connect(self._on_score_hovered)
+        self.weather_scatter.sigHovered.connect(self._on_weather_hovered)
+        self.weather_prediction_scatter.sigHovered.connect(self._on_weather_hovered)
 
     def _rescale_bg(self) -> None:
         if not hasattr(self, "_bg_pixmap") or self._bg_pixmap.isNull():
@@ -579,6 +574,40 @@ class AstronomyTrackerWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._rescale_bg()
+
+    def _on_score_hovered(self, scatter, points, ev) -> None:
+        if not len(points):
+            return
+        pt = points[0]
+        x_ts = datetime.fromtimestamp(pt.pos().x()).strftime("%Y-%m-%d %H:%M:%S")
+        y_val = pt.pos().y()
+        label = f"Score: {y_val:.0f} at {x_ts}"
+        if not hasattr(self, "_score_hover_text"):
+            self._score_hover_text = pg.TextItem(
+                "", color="#fbbf24", anchor=(0.5, 1.3), fill=pg.mkBrush("#0f172a")
+            )
+            self._score_hover_text.setFont(QFont("SF Mono", 9))
+            self.score_plot.addItem(self._score_hover_text)
+        self._score_hover_text.setText(label)
+        self._score_hover_text.setPos(pt.pos().x(), pt.pos().y())
+        self._score_hover_text.setVisible(True)
+
+    def _on_weather_hovered(self, scatter, points, ev) -> None:
+        if not len(points):
+            return
+        pt = points[0]
+        x_ts = datetime.fromtimestamp(pt.pos().x()).strftime("%Y-%m-%d %H:%M:%S")
+        y_val = pt.pos().y()
+        label = f"Weather: {y_val:.0f}% at {x_ts}"
+        if not hasattr(self, "_weather_hover_text"):
+            self._weather_hover_text = pg.TextItem(
+                "", color="#22d3ee", anchor=(0.5, 1.3), fill=pg.mkBrush("#0f172a")
+            )
+            self._weather_hover_text.setFont(QFont("SF Mono", 9))
+            self.weather_plot.addItem(self._weather_hover_text)
+        self._weather_hover_text.setText(label)
+        self._weather_hover_text.setPos(pt.pos().x(), pt.pos().y())
+        self._weather_hover_text.setVisible(True)
 
     def _sync_controls_from_state(self) -> None:
         """Set the control values based on the current tracker state."""
@@ -1098,9 +1127,9 @@ class AstronomyTrackerWindow(QMainWindow):
             pen=pg.mkPen("#60a5fa", width=1.8, style=Qt.PenStyle.DashLine),
             name="Score Forecast",
         )
-        self.score_scatter = pg.ScatterPlotItem(size=8)
+        self.score_scatter = pg.ScatterPlotItem(size=8, hoverable=True)
         self.score_plot.addItem(self.score_scatter)
-        self.score_prediction_scatter = pg.ScatterPlotItem(size=7)
+        self.score_prediction_scatter = pg.ScatterPlotItem(size=7, hoverable=True)
         self.score_plot.addItem(self.score_prediction_scatter)
         self.score_cursor = pg.InfiniteLine(
             angle=90,
@@ -1136,9 +1165,9 @@ class AstronomyTrackerWindow(QMainWindow):
             pen=pg.mkPen("#22d3ee", width=1.8, style=Qt.PenStyle.DashLine),
             name="Weather Forecast",
         )
-        self.weather_scatter = pg.ScatterPlotItem(size=8)
+        self.weather_scatter = pg.ScatterPlotItem(size=8, hoverable=True)
         self.weather_plot.addItem(self.weather_scatter)
-        self.weather_prediction_scatter = pg.ScatterPlotItem(size=7)
+        self.weather_prediction_scatter = pg.ScatterPlotItem(size=7, hoverable=True)
         self.weather_plot.addItem(self.weather_prediction_scatter)
         self.weather_cursor = pg.InfiniteLine(
             angle=90,
