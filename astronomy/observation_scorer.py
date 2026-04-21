@@ -132,7 +132,9 @@ class BaseObservationScorer(ABC):
         _ = (ctx, subscores, final_score)
         return {}
 
-    def combine_subscores(self, subscores: dict[str, float], ctx: ObservationContext) -> float:
+    def combine_subscores(
+        self, subscores: dict[str, float], ctx: ObservationContext
+    ) -> float:
         """
         Return a raw score in [0, 100].
 
@@ -141,11 +143,15 @@ class BaseObservationScorer(ABC):
         weights = self.get_score_weights(ctx, subscores)
         return self._weighted_score(subscores, weights)
 
-    def get_score_weights(self, ctx: ObservationContext, subscores: dict[str, float]) -> dict[str, float]:
+    def get_score_weights(
+        self, ctx: ObservationContext, subscores: dict[str, float]
+    ) -> dict[str, float]:
         _ = (ctx, subscores)
         return dict(self.SCORE_WEIGHTS)
 
-    def _weighted_score(self, subscores: dict[str, float], weights: dict[str, float]) -> float:
+    def _weighted_score(
+        self, subscores: dict[str, float], weights: dict[str, float]
+    ) -> float:
         if not weights:
             return 0.0
 
@@ -200,7 +206,9 @@ class BaseObservationScorer(ABC):
     def score_moon(self, ctx: ObservationContext) -> float:
         if ctx.moon_alt <= 0:
             return 1.0
-        penalty = 0.7 * ctx.moon_illumination * max(0.0, 1.0 - ctx.moon_separation / 90.0)
+        penalty = (
+            0.7 * ctx.moon_illumination * max(0.0, 1.0 - ctx.moon_separation / 90.0)
+        )
         return clamp(1.0 - penalty)
 
     def score_environment(self, ctx: ObservationContext) -> float:
@@ -224,7 +232,9 @@ class BaseObservationScorer(ABC):
             return "Good"
         return "Excellent"
 
-    def build_reasons(self, ctx: ObservationContext, subscores: dict[str, float]) -> list[str]:
+    def build_reasons(
+        self, ctx: ObservationContext, subscores: dict[str, float]
+    ) -> list[str]:
         reasons: list[str] = []
         if subscores["sun"] < 0.3:
             reasons.append("Sky is too bright due to the Sun")
@@ -249,7 +259,7 @@ class BaseObservationScorer(ABC):
     def find_limiting_factor(self, subscores: dict[str, float]) -> Optional[str]:
         if not subscores:
             return None
-        if subscores.get("weather", 1.0) < 0.4:
+        if subscores.get("weather", 0.5) < 0.4:
             return "weather conditions"
         key = min(subscores, key=lambda metric: subscores[metric])
         mapping = {

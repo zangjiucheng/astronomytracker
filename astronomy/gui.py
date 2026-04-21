@@ -191,6 +191,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_refresh_seconds = 2 * 60
         self.last_weather_update_utc: datetime | None = None
         self.latest_weather: dict[str, float | None] | None = None
+        self.hourly_forecast: dict[datetime, dict[str, float | None]] = {}
         # Threads for background work.
         self.tracking_thread: TrackingThread | None = None
         self.pending_request_thread: RequestThread | None = None
@@ -674,10 +675,10 @@ class AstronomyTrackerWindow(QMainWindow):
         moon_alt, moon_illumination, moon_separation = self._estimate_moon_context(
             sample
         )
-        weather = self.latest_weather or {}
+        forecast_weather = self._weather_for_time(sample.utc_time)
 
         def weather_or_default(key: str, default: float) -> float:
-            value = weather.get(key)
+            value = forecast_weather.get(key)
             if value is None:
                 return default
             return float(value)
@@ -695,13 +696,33 @@ class AstronomyTrackerWindow(QMainWindow):
             wind_speed=weather_or_default("wind_speed", 8.0),
             temperature=weather_or_default("temperature", 10.0),
             dew_point=weather_or_default("dew_point", 2.0),
-            seeing_arcsec=weather.get("seeing_arcsec"),
-            transparency=weather.get("transparency"),
+            seeing_arcsec=forecast_weather.get("seeing_arcsec"),
+            transparency=forecast_weather.get("transparency"),
             bortle=None,
             azimuth=sample.az_deg,
             magnitude=None,
             target_name=self.config.target_name,
         )
+
+    def _weather_for_time(self, t: datetime) -> dict[str, float | None]:
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        if self.hourly_forecast:
+            best_time: datetime | None = None
+            best_data: dict[str, float | None] | None = None
+            best_delta: float = 999999.0
+            for ft, fw in self.hourly_forecast.items():
+                delta = abs((ft - t).total_seconds())
+                if delta < 3600 and delta < best_delta:
+                    best_delta = delta
+                    best_time = ft
+                    best_data = fw
+            if best_data is not None:
+                return best_data
+        current = self.latest_weather
+        if current:
+            return current
+        return {}
 
     def _evaluate_observation(self, sample: EphemerisSample) -> ObservationScoreResult:
         return self.active_scorer.evaluate(self._build_observation_context(sample))
@@ -822,7 +843,7 @@ class AstronomyTrackerWindow(QMainWindow):
             float(result.score) for result in prediction_results
         ]
         self.predicted_weather_scores = [
-            100.0 * float(result.subscores.get("weather", 1.0))
+            100.0 * float(result.subscores.get("weather", 0.0))
             for result in prediction_results
         ]
         self.el_prediction_curve.setData(pred_timestamps, pred_elevations)
@@ -941,7 +962,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.elevations.append(sample.el_deg)
         self.observation_scores.append(float(score_result.score))
         self.weather_scores.append(
-            100.0 * float(score_result.subscores.get("weather", 1.0))
+            100.0 * float(score_result.subscores.get("weather", 0.0))
         )
         self.az_curve.setData(list(self.timestamps), list(self.azimuths))
         self.el_curve.setData(list(self.timestamps), list(self.elevations))
@@ -1255,7 +1276,9 @@ class AstronomyTrackerWindow(QMainWindow):
             return
         location = self.state.location
 
-        def action() -> dict[str, float | None]:
+        def action() -> tuple[
+            dict[str, float | None], dict[datetime, dict[str, float | None]]
+        ]:
             return self.fetcher.fetch_open_meteo_weather(location)
 
         thread = RequestThread(action, self)
@@ -1322,36 +1345,24 @@ class AstronomyTrackerWindow(QMainWindow):
     @Slot(object)
     def _handle_weather_result(self, payload: object) -> None:
         """Handle the response from a weather update request."""
-        if not isinstance(payload, dict):
+        if isinstance(payload, tuple) and len(payload) == 2:
+            current_weather, hourly_forecast = payload
+            self.latest_weather = {
+                k: float(v) if v is not None else None
+                for k, v in current_weather.items()
+            }
+            self.hourly_forecast = {
+                t: {k: float(wv) if wv is not None else None for k, wv in w.items()}
+                for t, w in hourly_forecast.items()
+            }
+        elif isinstance(payload, dict):
+            self.latest_weather = {
+                k: float(v) if v is not None else None for k, v in payload.items()
+            }
+            self.hourly_forecast.clear()
+        else:
             self._append_log("[WARN] Unexpected weather payload.")
             return
-        # Normalize the weather payload into floats or None.
-        self.latest_weather = {
-            "cloud_cover": float(payload["cloud_cover"])
-            if payload.get("cloud_cover") is not None
-            else None,
-            "humidity": float(payload["humidity"])
-            if payload.get("humidity") is not None
-            else None,
-            "visibility_km": float(payload["visibility_km"])
-            if payload.get("visibility_km") is not None
-            else None,
-            "wind_speed": float(payload["wind_speed"])
-            if payload.get("wind_speed") is not None
-            else None,
-            "temperature": float(payload["temperature"])
-            if payload.get("temperature") is not None
-            else None,
-            "dew_point": float(payload["dew_point"])
-            if payload.get("dew_point") is not None
-            else None,
-            "seeing_arcsec": float(payload["seeing_arcsec"])
-            if payload.get("seeing_arcsec") is not None
-            else None,
-            "transparency": float(payload["transparency"])
-            if payload.get("transparency") is not None
-            else None,
-        }
         self.last_weather_update_utc = datetime.now(timezone.utc)
         cloud = self.latest_weather.get("cloud_cover")
         humidity = self.latest_weather.get("humidity")
@@ -1362,7 +1373,8 @@ class AstronomyTrackerWindow(QMainWindow):
             f"cloud={cloud if cloud is not None else '-'}%, "
             f"humidity={humidity if humidity is not None else '-'}%, "
             f"visibility={visibility if visibility is not None else '-'}km, "
-            f"wind={wind if wind is not None else '-'}"
+            f"wind={wind if wind is not None else '-'}  "
+            f"forecast={len(self.hourly_forecast)}h"
         )
         # Recompute displayed and forecast scores with fresh weather values.
         if self.state.latest_sample is not None:
