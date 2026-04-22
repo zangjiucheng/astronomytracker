@@ -18,7 +18,7 @@ live on the main window.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QSlider,
     QPushButton,
+    QComboBox,
+    QLineEdit,
 )
 
 
@@ -136,3 +138,51 @@ class ControlsTab(QWidget):
         row2.addWidget(self.window.timeline_slider, 1)
         row2.addWidget(self.window.back_to_live_button)
         outer.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.setSpacing(10)
+
+        mount_label = QLabel("Mount")
+        mount_label.setObjectName("sectionTitleCompact")
+
+        self.window.mount_combo = QComboBox()
+        self.window.mount_combo.setObjectName("mountCombo")
+        self.window.mount_combo.addItems(["None", "Serial (USB)", "TCP/IP"])
+        self.window.mount_combo.setFixedSize(100, 26)
+
+        self.window.mount_port_edit = QLineEdit("/dev/ttyUSB0")
+        self.window.mount_port_edit.setPlaceholderText("Port or Host")
+        self.window.mount_port_edit.setFixedSize(120, 26)
+        self.window.mount_port_edit.setMaximumWidth(120)
+
+        self.window.mount_port_edit.setEnabled(False)
+
+        self.window.mount_connect_btn = QPushButton("Connect")
+        self.window.mount_connect_btn.setObjectName("secondaryButton")
+        self.window.mount_connect_btn.setFixedSize(80, 26)
+        self.window.mount_connect_btn.setEnabled(False)
+
+        self.window.mount_status_label = QLabel("Disconnected")
+        self.window.mount_status_label.setObjectName("mutedLabel")
+        self.window.mount_status_label.setStyleSheet("font-size: 10px;")
+
+        self.window.mount_goto_btn = QPushButton("Goto")
+        self.window.mount_goto_btn.setObjectName("secondaryButton")
+        self.window.mount_goto_btn.setFixedSize(60, 26)
+        self.window.mount_goto_btn.setEnabled(False)
+
+        self.window.mount_sync_btn = QPushButton("Sync")
+        self.window.mount_sync_btn.setObjectName("secondaryButton")
+        self.window.mount_sync_btn.setFixedSize(60, 26)
+        self.window.mount_sync_btn.setEnabled(False)
+
+        row3.addWidget(mount_label)
+        row3.addWidget(self.window.mount_combo)
+        row3.addWidget(self.window.mount_port_edit)
+        row3.addWidget(self.window.mount_connect_btn)
+        row3.addWidget(self.window.mount_status_label)
+        row3.addSpacing(10)
+        row3.addWidget(self.window.mount_goto_btn)
+        row3.addWidget(self.window.mount_sync_btn)
+        row3.addStretch(1)
+        outer.addLayout(row3)

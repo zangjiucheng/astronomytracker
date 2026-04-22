@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
 from astronomy.api_fetcher import HorizonsFetcher
 from astronomy.observation_scorer import ObservationContext, ObservationScoreResult
 from astronomy.scorer_factory import create_scorer
+from astronomy import protocol
 from astronomy.tracker_state import (
     EphemerisSample,
     ObserverLocation,
@@ -75,6 +76,7 @@ from .components.plots_tab import PlotsTab
 
 # Enable anti‑aliasing globally for pyqtgraph plots.
 pg.setConfigOptions(antialias=True)
+
 
 @dataclass(frozen=True)
 class TrackerAppConfig:
@@ -199,6 +201,9 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_request_thread: RequestThread | None = None
         # Active scorer instance used to evaluate observation quality.
         self.active_scorer = create_scorer(self.config.scorer_target_type)
+        # Mount controller state.
+        self.mount_protocol: protocol.PmcEightProtocol | None = None
+        self.mount_connected: bool = False
         # Configure the window itself.
         self.setWindowTitle(self.config.window_title)
         self.resize(1320, 860)
@@ -554,6 +559,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self.score_prediction_scatter.sigHovered.connect(self._on_score_hovered)
         self.weather_scatter.sigHovered.connect(self._on_weather_hovered)
         self.weather_prediction_scatter.sigHovered.connect(self._on_weather_hovered)
+        self.mount_combo.currentIndexChanged.connect(self._on_mount_type_changed)
+        self.mount_connect_btn.clicked.connect(self._on_mount_connect_clicked)
+        self.mount_goto_btn.clicked.connect(self._on_mount_goto_clicked)
+        self.mount_sync_btn.clicked.connect(self._on_mount_sync_clicked)
 
     def _setup_shortcuts(self) -> None:
         """Create keyboard shortcuts for common actions."""
@@ -589,9 +598,9 @@ class AstronomyTrackerWindow(QMainWindow):
             self._toggle_fullscreen,
         )
         QShortcut(
-            Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Comma, 
-            self, 
-            self.plots_tab._reset_all_plots
+            Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Comma,
+            self,
+            self.plots_tab._reset_all_plots,
         )
         QShortcut(Qt.Key.Key_H, self, self._timeline_step_back)
         QShortcut(Qt.Key.Key_L, self, self._timeline_step_forward)
@@ -1067,6 +1076,120 @@ class AstronomyTrackerWindow(QMainWindow):
         self.state.last_error = message
         self._append_log(f"[ERROR] {message}")
         self._update_status_banner(f"Error: {message}")
+
+    # -----------------------------------------------------------------
+    # Mount controller methods
+    # -----------------------------------------------------------------
+    def _on_mount_type_changed(self, index: int) -> None:
+        if index == 0:
+            self.mount_port_edit.setEnabled(False)
+            self.mount_port_edit.setPlaceholderText("Disabled")
+            self.mount_connect_btn.setEnabled(False)
+        else:
+            self.mount_port_edit.setEnabled(True)
+            if index == 1:
+                self.mount_port_edit.setPlaceholderText("/dev/ttyUSB0")
+            else:
+                self.mount_port_edit.setPlaceholderText("192.168.47.1")
+            self.mount_connect_btn.setEnabled(True)
+
+    def _on_mount_connect_clicked(self) -> None:
+        if self.mount_connected:
+            self._disconnect_mount()
+        else:
+            self._connect_mount()
+
+    def _connect_mount(self) -> None:
+        mount_type = self.mount_combo.currentIndex()
+        port_or_host = (
+            self.mount_port_edit.text().strip()
+            or self.mount_port_edit.placeholderText()
+        )
+        lon_deg = self.state.location.longitude_deg
+        lat_deg = self.state.location.latitude_deg
+
+        try:
+            if mount_type == 1:
+                transport = protocol.PmcEightSerialTransport(port=port_or_host)
+            else:
+                transport = protocol.PmcEightTcpTransport(host=port_or_host)
+            self.mount_protocol = protocol.PmcEightProtocol(
+                transport=transport,
+                longitude_deg=lon_deg,
+                latitude_deg=lat_deg,
+                northern_hemisphere=lat_deg >= 0,
+            )
+            self.mount_protocol.connect()
+            self.mount_connected = True
+            self.mount_connect_btn.setText("Disconnect")
+            self.mount_status_label.setText("Connected")
+            self.mount_goto_btn.setEnabled(True)
+            self.mount_sync_btn.setEnabled(True)
+            self._append_log(
+                f"[MOUNT] Connected via {'Serial' if mount_type == 1 else 'TCP'}: {port_or_host}"
+            )
+            self._update_status_banner(f"Mount connected: {port_or_host}")
+        except Exception as exc:
+            self._set_error_state(f"Mount connection failed: {exc}")
+
+    def _disconnect_mount(self) -> None:
+        if self.mount_protocol:
+            try:
+                self.mount_protocol.disconnect()
+            except Exception:
+                pass
+            self.mount_protocol = None
+        self.mount_connected = False
+        self.mount_connect_btn.setText("Connect")
+        self.mount_status_label.setText("Disconnected")
+        self.mount_goto_btn.setEnabled(False)
+        self.mount_sync_btn.setEnabled(False)
+        self._append_log("[MOUNT] Disconnected")
+        self._update_status_banner("Mount disconnected")
+
+    def _on_mount_goto_clicked(self) -> None:
+        if not self.mount_connected or not self.mount_protocol:
+            return
+        sample = self.state.latest_sample
+        if not sample:
+            self._update_status_banner("No target coordinates available")
+            return
+        try:
+            ra_response, dec_response = self.mount_protocol.slew_to_radec(
+                ra_deg=sample.ra_deg,
+                dec_deg=sample.dec_deg,
+                when_utc=sample.utc_time,
+            )
+            self._append_log(
+                f"[MOUNT] Goto: RA={sample.ra_deg:.6f} deg, Dec={sample.dec_deg:.6f} deg"
+            )
+            self._update_status_banner(
+                f"Mount goto RA {sample.ra_deg:.4f} Dec {sample.dec_deg:.4f}"
+            )
+        except Exception as exc:
+            self._set_error_state(f"Mount goto failed: {exc}")
+
+    def _on_mount_sync_clicked(self) -> None:
+        if not self.mount_connected or not self.mount_protocol:
+            return
+        sample = self.state.latest_sample
+        if not sample:
+            self._update_status_banner("No target coordinates available")
+            return
+        try:
+            ra_response, dec_response = self.mount_protocol.sync_to_radec(
+                ra_deg=sample.ra_deg,
+                dec_deg=sample.dec_deg,
+                when_utc=sample.utc_time,
+            )
+            self._append_log(
+                f"[MOUNT] Sync: RA={sample.ra_deg:.6f} deg, Dec={sample.dec_deg:.6f} deg"
+            )
+            self._update_status_banner(
+                f"Mount sync RA {sample.ra_deg:.4f} Dec {sample.dec_deg:.4f}"
+            )
+        except Exception as exc:
+            self._set_error_state(f"Mount sync failed: {exc}")
 
     # -----------------------------------------------------------------
     # Sky projection and prediction/weather refresh logic
