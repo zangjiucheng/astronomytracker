@@ -124,7 +124,9 @@ class ControlsTab(QWidget):
         )
 
         self.window.timeline_slider = QSlider(Qt.Orientation.Horizontal)
-        self.window.timeline_slider.setRange(0, self.window.prediction_horizon_minutes)
+        self.window.timeline_slider.setRange(
+            -self.window.history_horizon_minutes, self.window.prediction_horizon_minutes
+        )
         self.window.timeline_slider.setValue(0)
         self.window.timeline_slider.setSingleStep(1)
         self.window.timeline_slider.setPageStep(10)

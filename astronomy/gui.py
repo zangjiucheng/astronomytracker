@@ -46,9 +46,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QPushButton,
@@ -184,10 +186,16 @@ class AstronomyTrackerWindow(QMainWindow):
         self.prediction_horizon_minutes = 24 * 60
         self.prediction_step_minutes = 1
         self.prediction_refresh_seconds = 300
+        # History settings for past 24hr data.
+        self.history_horizon_minutes = 24 * 60
+        self.history_step_minutes = 1
         self.follow_live_projection = True
         self.predicted_samples: list[EphemerisSample] = []
         self.predicted_observation_scores: list[float] = []
         self.predicted_weather_scores: list[float] = []
+        self.history_24hr_samples: list[EphemerisSample] = []
+        self.history_24hr_observation_scores: list[float] = []
+        self.history_24hr_weather_scores: list[float] = []
         self.last_prediction_anchor_utc: datetime | None = None
         # Weather update settings.
         self.weather_refresh_seconds = 2 * 60
@@ -198,6 +206,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.tracking_thread: TrackingThread | None = None
         self.pending_request_thread: RequestThread | None = None
         self.prediction_request_thread: RequestThread | None = None
+        self.history_request_thread: RequestThread | None = None
         self.weather_request_thread: RequestThread | None = None
         # Active scorer instance used to evaluate observation quality.
         self.active_scorer = create_scorer(self.config.scorer_target_type)
@@ -606,6 +615,7 @@ class AstronomyTrackerWindow(QMainWindow):
         QShortcut(Qt.Key.Key_L, self, self._timeline_step_forward)
         QShortcut(Qt.Key.Key_J, self, lambda: self._timeline_step_back(1))
         QShortcut(Qt.Key.Key_K, self, lambda: self._timeline_step_forward(1))
+        QShortcut(Qt.Key.Key_G, self, self._show_goto_dialog)
 
     def _toggle_fullscreen(self) -> None:
         """Toggle between fullscreen and normal window mode."""
@@ -613,6 +623,23 @@ class AstronomyTrackerWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    def _show_goto_dialog(self) -> None:
+        """Show a dialog to input time offset and jump to that position."""
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Go to Time")
+        dialog.setLabelText(
+            "Enter time offset in minutes:\nnegative=past, positive=future, 0=live"
+        )
+        dialog.setIntValue(0)
+        dialog.setIntRange(
+            self.timeline_slider.minimum(), self.timeline_slider.maximum()
+        )
+        dialog.setInputMode(QInputDialog.InputMode.IntInput)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            value = dialog.intValue()
+            self.timeline_slider.setValue(value)
+            self._update_timeline_selection(value)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Handle key press events for additional keyboard navigation."""
@@ -701,8 +728,10 @@ class AstronomyTrackerWindow(QMainWindow):
     @Slot(int)
     def _on_timeline_slider_changed(self, offset_minutes: int) -> None:
         self.follow_live_projection = offset_minutes == 0
-        if self.follow_live_projection:
+        if offset_minutes == 0:
             self.timeline_status_label.setText("LIVE")
+        elif offset_minutes < 0:
+            self.timeline_status_label.setText(f"History T{offset_minutes} min")
         else:
             self.timeline_status_label.setText(f"Preview T+{offset_minutes} min")
         self.back_to_live_button.setEnabled(not self.follow_live_projection)
@@ -717,14 +746,15 @@ class AstronomyTrackerWindow(QMainWindow):
         self._update_timeline_selection(0)
 
     def _timeline_step_back(self, delta_minutes: float = 10) -> None:
-        """Move timeline back by specified minutes."""
+        """Move timeline back by specified minutes (toward history)."""
         current = int(self.timeline_slider.value())
+        min_val = self.timeline_slider.minimum()
         step = max(1, int(round(delta_minutes)))
-        new_value = max(0, current - step)
+        new_value = max(min_val, current - step)
         self.timeline_slider.setValue(int(new_value))
 
     def _timeline_step_forward(self, delta_minutes: float = 10) -> None:
-        """Move timeline forward by specified minutes."""
+        """Move timeline forward by specified minutes (toward future)."""
         current = int(self.timeline_slider.value())
         max_val = self.timeline_slider.maximum()
         step = max(1, int(round(delta_minutes)))
@@ -960,13 +990,53 @@ class AstronomyTrackerWindow(QMainWindow):
             size=7,
         )
 
+    def _update_history_24hr_plot_curves(self) -> None:
+        if not self.history_24hr_samples:
+            self.el_history_curve.setData([], [])
+            self.az_history_curve.setData([], [])
+            self.score_history_curve.setData([], [])
+            self.weather_history_curve.setData([], [])
+            return
+        history_timestamps = [
+            row.utc_time.timestamp() for row in self.history_24hr_samples
+        ]
+        history_elevations = [row.el_deg for row in self.history_24hr_samples]
+        history_azimuths = [row.az_deg for row in self.history_24hr_samples]
+        self.el_history_curve.setData(history_timestamps, history_elevations)
+        self.az_history_curve.setData(history_timestamps, history_azimuths)
+        self.score_history_curve.setData(
+            history_timestamps, self.history_24hr_observation_scores
+        )
+        self.weather_history_curve.setData(
+            history_timestamps, self.history_24hr_weather_scores
+        )
+
     def _update_timeline_selection(self, offset_minutes: int) -> None:
         if self.state.latest_sample is None:
             return
         self._update_sky_projection(self.state.latest_sample)
-        if offset_minutes == 0 or not self.predicted_samples:
+        if offset_minutes == 0:
             self._render_sample_fields(self.state.latest_sample)
             self._set_plot_cursor(self.state.latest_sample, preview=False)
+            return
+        if offset_minutes < 0:
+            if not self.history_24hr_samples:
+                self._render_sample_fields(self.state.latest_sample)
+                self._set_plot_cursor(self.state.latest_sample, preview=True)
+                return
+            history_index = min(
+                len(self.history_24hr_samples) - 1,
+                len(self.history_24hr_samples)
+                - 1
+                - ((-offset_minutes) // self.history_step_minutes),
+            )
+            history_sample = self.history_24hr_samples[history_index]
+            self._render_sample_fields(history_sample)
+            self._set_plot_cursor(history_sample, preview=True)
+            return
+        if not self.predicted_samples:
+            self._render_sample_fields(self.state.latest_sample)
+            self._set_plot_cursor(self.state.latest_sample, preview=True)
             return
         prediction_index = min(
             len(self.predicted_samples) - 1,
@@ -1243,6 +1313,9 @@ class AstronomyTrackerWindow(QMainWindow):
         self.sky_prediction_curve = self.sky_plot.plot(
             pen=pg.mkPen("#22c55e", width=2, style=Qt.PenStyle.DashLine)
         )
+        self.sky_history_curve = self.sky_plot.plot(
+            pen=pg.mkPen("#a78bfa", width=1.8, style=Qt.PenStyle.DotLine)
+        )
         # Marker for the current/predicted target position.
         self.sky_target_marker = pg.ScatterPlotItem(
             size=13, brush=pg.mkBrush("#f59e0b"), pen=pg.mkPen("#fbbf24", width=2)
@@ -1276,6 +1349,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self.el_prediction_curve = self.elevation_plot.plot(
             pen=pg.mkPen("#34d399", width=2, style=Qt.PenStyle.DashLine),
             name="Elevation Forecast",
+        )
+        self.el_history_curve = self.elevation_plot.plot(
+            pen=pg.mkPen("#a78bfa", width=1.8, style=Qt.PenStyle.DotLine),
+            name="Elevation 24hr History",
         )
         self.elevation_cursor = pg.InfiniteLine(
             angle=90,
@@ -1311,6 +1388,10 @@ class AstronomyTrackerWindow(QMainWindow):
             pen=pg.mkPen("#34d399", width=2, style=Qt.PenStyle.DashLine),
             name="Azimuth Forecast",
         )
+        self.az_history_curve = self.azimuth_plot.plot(
+            pen=pg.mkPen("#a78bfa", width=1.8, style=Qt.PenStyle.DotLine),
+            name="Azimuth 24hr History",
+        )
         self.azimuth_cursor = pg.InfiniteLine(
             angle=90,
             movable=False,
@@ -1344,6 +1425,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self.score_prediction_curve = self.score_plot.plot(
             pen=pg.mkPen("#60a5fa", width=1.8, style=Qt.PenStyle.DashLine),
             name="Score Forecast",
+        )
+        self.score_history_curve = self.score_plot.plot(
+            pen=pg.mkPen("#a78bfa", width=1.8, style=Qt.PenStyle.DotLine),
+            name="Score 24hr History",
         )
         self.score_scatter = pg.ScatterPlotItem(size=8, hoverable=True)
         self.score_plot.addItem(self.score_scatter)
@@ -1382,6 +1467,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_prediction_curve = self.weather_plot.plot(
             pen=pg.mkPen("#22d3ee", width=1.8, style=Qt.PenStyle.DashLine),
             name="Weather Forecast",
+        )
+        self.weather_history_curve = self.weather_plot.plot(
+            pen=pg.mkPen("#a78bfa", width=1.8, style=Qt.PenStyle.DotLine),
+            name="Weather 24hr History",
         )
         self.weather_scatter = pg.ScatterPlotItem(size=8, hoverable=True)
         self.weather_plot.addItem(self.weather_scatter)
@@ -1427,6 +1516,15 @@ class AstronomyTrackerWindow(QMainWindow):
         pred_xs = [point[0] for point in predicted_xy]
         pred_ys = [point[1] for point in predicted_xy]
         self.sky_prediction_curve.setData(pred_xs, pred_ys)
+        # Draw past 24hr history trail.
+        if self.history_24hr_samples:
+            history_xy = [
+                self._sky_xy_from_altaz(row.az_deg, row.el_deg)
+                for row in self.history_24hr_samples
+            ]
+            hist_xs = [point[0] for point in history_xy]
+            hist_ys = [point[1] for point in history_xy]
+            self.sky_history_curve.setData(hist_xs, hist_ys)
         # Choose whether to display the live sample or a preview sample.
         display_sample = sample
         marker_label_prefix = "LIVE"
@@ -1511,6 +1609,31 @@ class AstronomyTrackerWindow(QMainWindow):
         thread.error_occurred.connect(self._handle_prediction_error)
         thread.start()
 
+    def _request_history_24hr(self, anchor_time: datetime) -> None:
+        """Dispatch a request to fetch past 24hr ephemeris history."""
+        if self.history_request_thread and self.history_request_thread.isRunning():
+            return
+        anchor = anchor_time.astimezone(timezone.utc)
+        stop_time = anchor
+        start_time = anchor - timedelta(minutes=self.history_horizon_minutes)
+        target_command = self.state.target_command
+        location = self.state.location
+
+        def action() -> list[EphemerisSample]:
+            return self.fetcher.fetch_ephemeris_range(
+                target_command=target_command,
+                location=location,
+                start_time=start_time,
+                stop_time=stop_time,
+                step_minutes=self.history_step_minutes,
+            )
+
+        thread = RequestThread(action, self)
+        self.history_request_thread = thread
+        thread.result_ready.connect(self._handle_history_24hr_result)
+        thread.error_occurred.connect(self._handle_history_24hr_error)
+        thread.start()
+
     @Slot(object)
     def _handle_prediction_result(self, payload: object) -> None:
         """Handle the response from a prediction trajectory request."""
@@ -1524,9 +1647,9 @@ class AstronomyTrackerWindow(QMainWindow):
         self.predicted_samples = rows
         self.last_prediction_anchor_utc = rows[0].utc_time
         self._update_prediction_plot_curves()
-        self.timeline_slider.setRange(
-            0, max(0, (len(rows) - 1) * self.prediction_step_minutes)
-        )
+        history_count = len(self.history_24hr_samples) * self.history_step_minutes
+        future_count = len(rows) * self.prediction_step_minutes
+        self.timeline_slider.setRange(-history_count, future_count)
         self.back_to_live_button.setEnabled(not self.follow_live_projection)
         if self.state.latest_sample:
             self._update_sky_projection(self.state.latest_sample)
@@ -1538,6 +1661,34 @@ class AstronomyTrackerWindow(QMainWindow):
     def _handle_prediction_error(self, message: str) -> None:
         """Handle errors that occur during prediction requests."""
         self._append_log(f"[WARN] Prediction update failed: {message}")
+
+    @Slot(object)
+    def _handle_history_24hr_result(self, payload: object) -> None:
+        """Handle the response from a past 24hr history request."""
+        if not isinstance(payload, list):
+            self._append_log("[WARN] Unexpected 24hr history payload.")
+            return
+        rows = [row for row in payload if isinstance(row, EphemerisSample)]
+        if not rows:
+            self._append_log("[WARN] 24hr history returned no samples.")
+            return
+        self.history_24hr_samples = rows
+        self.history_24hr_observation_scores = [
+            float(self._evaluate_observation(row).score) for row in rows
+        ]
+        self.history_24hr_weather_scores = [
+            100.0 * float(self._evaluate_observation(row).subscores.get("weather", 0.0))
+            for row in rows
+        ]
+        self._update_history_24hr_plot_curves()
+        self._append_log(
+            f"History 24hr loaded: {len(rows)} samples for the past {self.history_horizon_minutes // 60}h."
+        )
+
+    @Slot(str)
+    def _handle_history_24hr_error(self, message: str) -> None:
+        """Handle errors that occur during 24hr history requests."""
+        self._append_log(f"[WARN] 24hr history update failed: {message}")
 
     @Slot(object)
     def _handle_weather_result(self, payload: object) -> None:
@@ -1655,6 +1806,9 @@ class AstronomyTrackerWindow(QMainWindow):
         self.predicted_samples.clear()
         self.predicted_observation_scores.clear()
         self.predicted_weather_scores.clear()
+        self.history_24hr_samples.clear()
+        self.history_24hr_observation_scores.clear()
+        self.history_24hr_weather_scores.clear()
         self.weather_scores.clear()
         self.last_prediction_anchor_utc = None
         self.last_weather_update_utc = None
@@ -1662,15 +1816,21 @@ class AstronomyTrackerWindow(QMainWindow):
         self.follow_live_projection = True
         self.timeline_status_label.setText("LIVE")
         self.timeline_slider.setValue(0)
-        self.timeline_slider.setRange(0, self.prediction_horizon_minutes)
+        self.timeline_slider.setRange(
+            -self.history_horizon_minutes, self.prediction_horizon_minutes
+        )
         self.back_to_live_button.setEnabled(False)
         self.sky_prediction_curve.setData([], [])
+        self.sky_history_curve.setData([], [])
         self._update_prediction_plot_curves()
+        self._update_history_24hr_plot_curves()
         self._append_log(
             f"Tracking started for lat={location.latitude_deg:.6f}, lon={location.longitude_deg:.6f}, "
             f"elev={location.elevation_km:.3f} km, interval={interval_sec}s"
         )
         self.tracking_thread.start()
+        # Fetch past 24hr history after tracking starts.
+        self._request_history_24hr(datetime.now(timezone.utc))
 
     @Slot()
     def stop_tracking(self) -> None:
