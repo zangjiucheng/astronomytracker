@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
 
 class HorizonsError(RuntimeError):
     pass
+
+
+def ra_to_hms(ra_deg: float) -> str:
+    hours = ra_deg / 15.0
+    h = int(hours)
+    m = int((hours - h) * 60)
+    s = ((hours - h) * 60 - m) * 60
+    return f"{h:02d}:{m:02d}:{s:05.2f}"
+
+
+def dec_to_dms(dec_deg: float) -> str:
+    sign = "+" if dec_deg >= 0 else "-"
+    dec_deg = abs(dec_deg)
+    d = int(dec_deg)
+    m = int((dec_deg - d) * 60)
+    s = ((dec_deg - d) * 60 - m) * 60
+    return f"{sign}{d:02d}:{m:02d}:{s:04.1f}"
 
 
 class HorizonsParseError(HorizonsError):

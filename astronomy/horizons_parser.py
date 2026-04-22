@@ -47,25 +47,45 @@ class HorizonsParser:
     """
 
     def parse(self, response_text: str) -> EphemerisSample:
-        samples = self.parse_many(response_text)
+        try:
+            samples = self.parse_many(response_text)
+        except HorizonsError:
+            raise
         if not samples:
             raise HorizonsParseError("Horizons response contains no data rows.")
         return samples[0]
 
     def parse_many(self, response_text: str) -> list[EphemerisSample]:
-        if "No matches found" in response_text or "Matching small-bodies" in response_text:
-            raise HorizonsError("Horizons could not uniquely resolve the target object.\n" + response_text)
+        non_ephemeris_indicators = [
+            "No matches found",
+            "Matching small-bodies",
+            "Unknown object",
+            "Invalid object",
+            "object not found",
+            "unable to resolve",
+            "Multiple major-bodies match",
+            "Multiple minor-bodies match",
+        ]
+        for indicator in non_ephemeris_indicators:
+            if indicator.lower() in response_text.lower():
+                raise HorizonsError(
+                    f"Horizons could not resolve the target object.\n{response_text}"
+                )
 
         lines = response_text.splitlines()
         start_index = self._find_marker_index(lines, "$$SOE")
         end_index = self._find_marker_index(lines, "$$EOE")
         if end_index <= start_index:
-            raise HorizonsParseError("Horizons response is malformed: $$EOE appears before $$SOE.")
+            raise HorizonsParseError(
+                "Horizons response is malformed: $$EOE appears before $$SOE."
+            )
 
         header_line = self._find_header_line(lines[:start_index])
         header_tokens = self._split_csv_line(header_line)
         indices = self._map_header_indices(header_tokens)
-        data_lines = [line for line in lines[start_index + 1 : end_index] if line.strip()]
+        data_lines = [
+            line for line in lines[start_index + 1 : end_index] if line.strip()
+        ]
         if not data_lines:
             raise HorizonsParseError("Horizons response contains no data rows.")
 
@@ -75,13 +95,23 @@ class HorizonsParser:
         for index, line in enumerate(lines):
             if marker in line:
                 return index
-        raise HorizonsParseError(f"Could not find {marker} in Horizons response.")
+        sample = "\n".join(lines[:20])
+        raise HorizonsParseError(
+            f"Could not find {marker} in Horizons response:\n{sample}"
+        )
 
     def _find_header_line(self, lines: list[str]) -> str:
         for line in reversed(lines[-50:]):
-            if "Date__" in line and "R.A." in line and "Azimuth" in line and "Elevation" in line:
+            if (
+                "Date__" in line
+                and "R.A." in line
+                and "Azimuth" in line
+                and "Elevation" in line
+            ):
                 return line
-        raise HorizonsParseError("Could not locate Horizons observer table header line.")
+        raise HorizonsParseError(
+            "Could not locate Horizons observer table header line."
+        )
 
     def _find_first_data_line(self, lines: list[str]) -> str:
         for line in lines:
@@ -89,7 +119,9 @@ class HorizonsParser:
                 return line
         raise HorizonsParseError("Horizons response contains no data rows.")
 
-    def _parse_data_line(self, data_line: str, indices: dict[str, int]) -> EphemerisSample:
+    def _parse_data_line(
+        self, data_line: str, indices: dict[str, int]
+    ) -> EphemerisSample:
         row_tokens = self._split_csv_line(data_line)
         self._validate_row_length(row_tokens, indices)
 
@@ -103,20 +135,34 @@ class HorizonsParser:
             range_rate_kms = float(row_tokens[indices["deldot"]])
             solar_elong_deg = float(row_tokens[indices["solar_elong"]])
             solar_presence = self._safe_token(row_tokens, indices["solar_presence"])
-            interferer_presence = self._safe_token(row_tokens, indices["interferer_presence"])
-            solar_alignment_code = self._safe_token(row_tokens, indices["solar_alignment_code"])
+            interferer_presence = self._safe_token(
+                row_tokens, indices["interferer_presence"]
+            )
+            solar_alignment_code = self._safe_token(
+                row_tokens, indices["solar_alignment_code"]
+            )
         except (ValueError, IndexError) as exc:
-            raise HorizonsParseError(f"Failed to parse Horizons data row:\n{data_line}\n{exc}") from exc
+            raise HorizonsParseError(
+                f"Failed to parse Horizons data row:\n{data_line}\n{exc}"
+            ) from exc
 
         # These validations prevent silently accepting shifted or malformed columns.
         if not (-90.0 <= dec_deg <= 90.0):
-            raise HorizonsParseError(f"Invalid declination value {dec_deg}; expected -90..90 degrees.")
+            raise HorizonsParseError(
+                f"Invalid declination value {dec_deg}; expected -90..90 degrees."
+            )
         if not (0.0 <= az_deg <= 360.0):
-            raise HorizonsParseError(f"Invalid azimuth value {az_deg}; expected 0..360 degrees.")
+            raise HorizonsParseError(
+                f"Invalid azimuth value {az_deg}; expected 0..360 degrees."
+            )
         if not (-90.0 <= el_deg <= 90.0):
-            raise HorizonsParseError(f"Invalid elevation value {el_deg}; expected -90..90 degrees.")
+            raise HorizonsParseError(
+                f"Invalid elevation value {el_deg}; expected -90..90 degrees."
+            )
         if not (0.0 <= solar_elong_deg <= 180.0):
-            raise HorizonsParseError(f"Invalid solar elongation value {solar_elong_deg}; expected 0..180 degrees.")
+            raise HorizonsParseError(
+                f"Invalid solar elongation value {solar_elong_deg}; expected 0..180 degrees."
+            )
 
         local_time = utc_time.astimezone()
         visibility_status = "Above horizon" if el_deg > 0.0 else "Below horizon"
@@ -146,7 +192,9 @@ class HorizonsParser:
             for index, token in enumerate(header_tokens):
                 if predicate(token, _normalize_token(token)):
                     return index
-            raise HorizonsParseError(f"Could not locate '{label}' in Horizons header: {header_tokens}")
+            raise HorizonsParseError(
+                f"Could not locate '{label}' in Horizons header: {header_tokens}"
+            )
 
         time_index = first_index(lambda raw, norm: norm.startswith("date"), "time")
         solar_presence_index = time_index + 1
@@ -162,14 +210,20 @@ class HorizonsParser:
             "el": first_index(lambda raw, norm: "elevation" in norm, "Elevation"),
             "delta": first_index(lambda raw, norm: norm == "delta", "delta"),
             "deldot": first_index(lambda raw, norm: norm == "deldot", "deldot"),
-            "solar_elong": first_index(lambda raw, norm: norm == "sot", "solar elongation"),
+            "solar_elong": first_index(
+                lambda raw, norm: norm == "sot", "solar elongation"
+            ),
             "solar_alignment_code": first_index(
-                lambda raw, norm: norm in {"r", "l", "t", "?"} or raw.strip().startswith("/"),
+                lambda raw, norm: (
+                    norm in {"r", "l", "t", "?"} or raw.strip().startswith("/")
+                ),
                 "/r code",
             ),
         }
 
-    def _validate_row_length(self, row_tokens: list[str], indices: dict[str, int]) -> None:
+    def _validate_row_length(
+        self, row_tokens: list[str], indices: dict[str, int]
+    ) -> None:
         needed_index = max(indices.values())
         if len(row_tokens) <= needed_index:
             raise HorizonsParseError(

@@ -76,19 +76,6 @@ from .components.plots_tab import PlotsTab
 # Enable anti‑aliasing globally for pyqtgraph plots.
 pg.setConfigOptions(antialias=True)
 
-# Keyboard shortcut definitions for the application.
-SHORTCUTS = {
-    "start_tracking": ("Ctrl+R", "Start tracking"),
-    "stop_tracking": ("Ctrl+S", "Stop tracking"),
-    "refresh_location": ("Ctrl+L", "Load IP location"),
-    "back_to_live": ("Space", "Return to live view"),
-    "timeline_back": ("H", "Timeline back 10 min"),
-    "timeline_forward": ("L", "Timeline forward 10 min"),
-    "toggle_fullscreen": ("Ctrl+F", "Toggle fullscreen"),
-    "quit": ("Ctrl+Q", "Quit application"),
-}
-
-
 @dataclass(frozen=True)
 class TrackerAppConfig:
     app_name: str = "Astronomy Tracker"
@@ -601,8 +588,15 @@ class AstronomyTrackerWindow(QMainWindow):
             self,
             self._toggle_fullscreen,
         )
+        QShortcut(
+            Qt.KeyboardModifier.ControlModifier | Qt.Key.Key_Comma, 
+            self, 
+            self.plots_tab._reset_all_plots
+        )
         QShortcut(Qt.Key.Key_H, self, self._timeline_step_back)
         QShortcut(Qt.Key.Key_L, self, self._timeline_step_forward)
+        QShortcut(Qt.Key.Key_J, self, lambda: self._timeline_step_back(1))
+        QShortcut(Qt.Key.Key_K, self, lambda: self._timeline_step_forward(1))
 
     def _toggle_fullscreen(self) -> None:
         """Toggle between fullscreen and normal window mode."""
@@ -713,18 +707,20 @@ class AstronomyTrackerWindow(QMainWindow):
         self.back_to_live_button.setEnabled(False)
         self._update_timeline_selection(0)
 
-    def _timeline_step_back(self) -> None:
-        """Move timeline back by 10 minutes."""
+    def _timeline_step_back(self, delta_minutes: float = 10) -> None:
+        """Move timeline back by specified minutes."""
         current = int(self.timeline_slider.value())
-        new_value = max(0, current - 10)
-        self.timeline_slider.setValue(new_value)
+        step = max(1, int(round(delta_minutes)))
+        new_value = max(0, current - step)
+        self.timeline_slider.setValue(int(new_value))
 
-    def _timeline_step_forward(self) -> None:
-        """Move timeline forward by 10 minutes."""
+    def _timeline_step_forward(self, delta_minutes: float = 10) -> None:
+        """Move timeline forward by specified minutes."""
         current = int(self.timeline_slider.value())
         max_val = self.timeline_slider.maximum()
-        new_value = min(max_val, current + 10)
-        self.timeline_slider.setValue(new_value)
+        step = max(1, int(round(delta_minutes)))
+        new_value = min(max_val, current + step)
+        self.timeline_slider.setValue(int(new_value))
 
     # -----------------------------------------------------------------
     # Observation scoring helpers

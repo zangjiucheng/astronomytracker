@@ -118,8 +118,11 @@ class HorizonsFetcher:
                     backoff_seconds *= 2.0
 
         assert last_error is not None
+        error_msg = str(last_error)
+        if isinstance(last_error, HorizonsError):
+            raise last_error
         raise HorizonsError(
-            f"Failed to fetch Horizons ephemeris after {self.retries} attempts: {last_error}"
+            f"Failed to fetch Horizons ephemeris after {self.retries} attempts: {error_msg}"
         ) from last_error
 
     def fetch_ephemeris_range(
