@@ -34,7 +34,6 @@ from typing import Callable
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot, QTimer
 from PySide6.QtGui import (
-    QBrush,
     QColor,
     QFont,
     QIcon,
@@ -55,15 +54,17 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSizePolicy,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from astronomy.api_fetcher import HorizonsFetcher
 from astronomy.observation_scorer import ObservationContext, ObservationScoreResult
+from astronomy.plot_data import score_series
+from astronomy import request_tasks
 from astronomy.scorer_factory import create_scorer
 from astronomy import protocol
+from astronomy.timeline import TimelineSelection, select_timeline_sample
 from astronomy.tracker_state import (
     EphemerisSample,
     ObserverLocation,
@@ -121,13 +122,13 @@ class TrackingThread(QThread):
 
     def __init__(
         self,
-        fetcher: HorizonsFetcher,
         state: TrackerState,
+        fetcher_factory: Callable[[], HorizonsFetcher] = HorizonsFetcher,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self._fetcher = fetcher
         self._state_snapshot = state
+        self._fetcher_factory = fetcher_factory
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
 
@@ -139,12 +140,13 @@ class TrackingThread(QThread):
         self._stop_event.set()
 
     def run(self) -> None:
+        fetcher = self._fetcher_factory()
         self.status_message.emit("Tracking started")
         while not self._stop_event.is_set():
             with self._lock:
                 state = self._state_snapshot
             try:
-                sample = self._fetcher.fetch_current_ephemeris(
+                sample = fetcher.fetch_current_ephemeris(
                     state.target_command, state.location
                 )
                 self.sample_ready.emit(sample)
@@ -170,7 +172,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self, state: TrackerState | None = None, config: TrackerAppConfig | None = None
     ) -> None:
         super().__init__()
-        self.fetcher = HorizonsFetcher()
+        self.fetcher_factory: Callable[[], HorizonsFetcher] = HorizonsFetcher
         self.state = state or TrackerState()
         self.config = config or TrackerAppConfig()
         # Limits on history and plot buffers.
@@ -184,11 +186,11 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_scores: deque[float] = deque(maxlen=self.plot_limit)
         # Prediction settings.
         self.prediction_horizon_minutes = 24 * 60
-        self.prediction_step_minutes = 1
+        self.prediction_step_minutes = 5
         self.prediction_refresh_seconds = 300
         # History settings for past 24hr data.
         self.history_horizon_minutes = 24 * 60
-        self.history_step_minutes = 1
+        self.history_step_minutes = 5
         self.follow_live_projection = True
         self.predicted_samples: list[EphemerisSample] = []
         self.predicted_observation_scores: list[float] = []
@@ -339,14 +341,18 @@ class AstronomyTrackerWindow(QMainWindow):
     def _apply_dark_theme(self) -> None:
         """Apply a dark colour palette to the entire window."""
         # Same stylesheet used by the original GUI.  Tabs inherit these rules.
+        combo_arrow_path = (
+            Path(__file__).resolve().parent / "static" / "chevron-down.svg"
+        ).as_posix()
         self.setStyleSheet(
             """
             QWidget {
-                background: rgba(2, 8, 23, 0.6);
+                background: transparent;
                 color: #e2e8f0;
                 font-size: 12px;
             }
             QMainWindow, #rootWidget {
+                background: #050914;
             }
             #heroFrame {
                 background: rgba(8, 17, 32, 0.75);
@@ -460,6 +466,59 @@ class AstronomyTrackerWindow(QMainWindow):
                 width: 18px;
                 border: none;
             }
+            QComboBox {
+                background: #0f172a;
+                color: #f8fafc;
+                border: 1px solid #274060;
+                border-radius: 8px;
+                padding: 4px 30px 4px 12px;
+                selection-background-color: #2563eb;
+                combobox-popup: 0;
+            }
+            QComboBox:hover {
+                border-color: #38bdf8;
+                background: #132033;
+            }
+            QComboBox:disabled {
+                color: #64748b;
+                background: #0b1120;
+                border-color: #1f2937;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #274060;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+                background: #13253a;
+            }
+            QComboBox::down-arrow {
+                image: url("__COMBO_ARROW__");
+                border: none;
+                width: 10px;
+                height: 6px;
+            }
+            QComboBox QAbstractItemView {
+                background: #0f172a;
+                color: #f8fafc;
+                border: 1px solid #274060;
+                padding: 0;
+                margin: 0;
+                selection-background-color: #2563eb;
+                selection-color: #eff6ff;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 26px;
+                padding: 5px 12px;
+                background: #0f172a;
+                color: #f8fafc;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background: #2563eb;
+                color: #eff6ff;
+            }
             QPushButton {
                 background: #18283b;
                 color: #e5eefb;
@@ -500,25 +559,41 @@ class AstronomyTrackerWindow(QMainWindow):
                 background: #341823;
             }
             #ghostButton {
-                background: transparent;
+                background: #13253a;
                 border: 1px solid #28415d;
                 color: #cbd5e1;
             }
+            #ghostButton:hover {
+                background: #1d334d;
+            }
+            #ghostButton:pressed {
+                background: #0f1f33;
+            }
+            #ghostButton:disabled {
+                color: #64748b;
+                background: #0f172a;
+                border-color: #1f2937;
+            }
             QSlider::groove:horizontal {
-                border: none;
-                height: 6px;
-                border-radius: 3px;
-                background: #132033;
+                border: 1px solid #274060;
+                height: 8px;
+                border-radius: 4px;
+                background: #0f172a;
             }
             QSlider::sub-page:horizontal {
                 background: #2563eb;
-                border-radius: 3px;
+                border-radius: 4px;
             }
             QSlider::handle:horizontal {
-                background: #e2e8f0;
-                width: 16px;
-                margin: -5px 0;
+                background: #dbeafe;
+                border: 2px solid #38bdf8;
+                width: 18px;
+                margin: -7px 0;
                 border-radius: 8px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #ffffff;
+                border-color: #93c5fd;
             }
             QPlainTextEdit {
                 background: #07111f;
@@ -555,6 +630,7 @@ class AstronomyTrackerWindow(QMainWindow):
                 border: 1px solid #334155;
             }
             """
+            .replace("__COMBO_ARROW__", combo_arrow_path)
         )
 
     def _bind_signals(self) -> None:
@@ -821,14 +897,12 @@ class AstronomyTrackerWindow(QMainWindow):
         if t.tzinfo is None:
             t = t.replace(tzinfo=timezone.utc)
         if self.hourly_forecast:
-            best_time: datetime | None = None
             best_data: dict[str, float | None] | None = None
             best_delta: float = 999999.0
             for ft, fw in self.hourly_forecast.items():
                 delta = abs((ft - t).total_seconds())
                 if delta < 3600 and delta < best_delta:
                     best_delta = delta
-                    best_time = ft
                     best_data = fw
             if best_data is not None:
                 return best_data
@@ -949,16 +1023,10 @@ class AstronomyTrackerWindow(QMainWindow):
         pred_timestamps = [row.utc_time.timestamp() for row in self.predicted_samples]
         pred_elevations = [row.el_deg for row in self.predicted_samples]
         pred_azimuths = [row.az_deg for row in self.predicted_samples]
-        prediction_results = [
-            self._evaluate_observation(row) for row in self.predicted_samples
-        ]
-        self.predicted_observation_scores = [
-            float(result.score) for result in prediction_results
-        ]
-        self.predicted_weather_scores = [
-            100.0 * float(result.subscores.get("weather", 0.0))
-            for result in prediction_results
-        ]
+        (
+            self.predicted_observation_scores,
+            self.predicted_weather_scores,
+        ) = score_series(self.predicted_samples, self._evaluate_observation)
         self.el_prediction_curve.setData(pred_timestamps, pred_elevations)
         self.az_prediction_curve.setData(pred_timestamps, pred_azimuths)
         self.score_prediction_curve.setData(
@@ -1011,40 +1079,29 @@ class AstronomyTrackerWindow(QMainWindow):
             history_timestamps, self.history_24hr_weather_scores
         )
 
+    def _current_timeline_selection(
+        self, latest_sample: EphemerisSample, offset_minutes: int | None = None
+    ) -> TimelineSelection[EphemerisSample]:
+        if offset_minutes is None:
+            offset_minutes = int(self.timeline_slider.value())
+        return select_timeline_sample(
+            latest_sample=latest_sample,
+            history_samples=self.history_24hr_samples,
+            predicted_samples=self.predicted_samples,
+            history_step_minutes=self.history_step_minutes,
+            prediction_step_minutes=self.prediction_step_minutes,
+            offset_minutes=offset_minutes,
+        )
+
     def _update_timeline_selection(self, offset_minutes: int) -> None:
         if self.state.latest_sample is None:
             return
-        self._update_sky_projection(self.state.latest_sample)
-        if offset_minutes == 0:
-            self._render_sample_fields(self.state.latest_sample)
-            self._set_plot_cursor(self.state.latest_sample, preview=False)
-            return
-        if offset_minutes < 0:
-            if not self.history_24hr_samples:
-                self._render_sample_fields(self.state.latest_sample)
-                self._set_plot_cursor(self.state.latest_sample, preview=True)
-                return
-            history_index = min(
-                len(self.history_24hr_samples) - 1,
-                len(self.history_24hr_samples)
-                - 1
-                - ((-offset_minutes) // self.history_step_minutes),
-            )
-            history_sample = self.history_24hr_samples[history_index]
-            self._render_sample_fields(history_sample)
-            self._set_plot_cursor(history_sample, preview=True)
-            return
-        if not self.predicted_samples:
-            self._render_sample_fields(self.state.latest_sample)
-            self._set_plot_cursor(self.state.latest_sample, preview=True)
-            return
-        prediction_index = min(
-            len(self.predicted_samples) - 1,
-            offset_minutes // self.prediction_step_minutes,
+        selection = self._current_timeline_selection(
+            self.state.latest_sample, offset_minutes
         )
-        preview_sample = self.predicted_samples[prediction_index]
-        self._render_sample_fields(preview_sample)
-        self._set_plot_cursor(preview_sample, preview=True)
+        self._update_sky_projection(self.state.latest_sample)
+        self._render_sample_fields(selection.sample)
+        self._set_plot_cursor(selection.sample, preview=selection.preview)
 
     def _set_tracking_ui(self, running: bool) -> None:
         self.state.is_tracking = running
@@ -1225,7 +1282,7 @@ class AstronomyTrackerWindow(QMainWindow):
             self._update_status_banner("No target coordinates available")
             return
         try:
-            ra_response, dec_response = self.mount_protocol.slew_to_radec(
+            self.mount_protocol.slew_to_radec(
                 ra_deg=sample.ra_deg,
                 dec_deg=sample.dec_deg,
                 when_utc=sample.utc_time,
@@ -1247,7 +1304,7 @@ class AstronomyTrackerWindow(QMainWindow):
             self._update_status_banner("No target coordinates available")
             return
         try:
-            ra_response, dec_response = self.mount_protocol.sync_to_radec(
+            self.mount_protocol.sync_to_radec(
                 ra_deg=sample.ra_deg,
                 dec_deg=sample.dec_deg,
                 when_utc=sample.utc_time,
@@ -1485,7 +1542,37 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_plot.addItem(self.weather_cursor)
         self.weather_plot.setXLink(self.elevation_plot)
 
+        self._disable_plot_wheel_zoom(
+            self.sky_plot,
+            self.elevation_plot,
+            self.azimuth_plot,
+            self.score_plot,
+            self.weather_plot,
+        )
         self._set_initial_plot_time_window()
+
+    def _disable_plot_wheel_zoom(self, *plots: pg.PlotWidget) -> None:
+        """Let plain wheel scroll the page; use Ctrl/Command+wheel for plot zoom."""
+        for plot in plots:
+            view_box = plot.getViewBox()
+            original_wheel_event = view_box.wheelEvent
+
+            def wheel_event(
+                event,
+                axis=None,
+                *,
+                original_wheel_event=original_wheel_event,
+            ) -> None:
+                zoom_modifiers = (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.MetaModifier
+                )
+                if event.modifiers() & zoom_modifiers:
+                    original_wheel_event(event, axis=axis)
+                    return
+                event.ignore()
+
+            view_box.wheelEvent = wheel_event
 
     def _sky_xy_from_altaz(self, az_deg: float, el_deg: float) -> tuple[float, float]:
         """Convert azimuth/elevation into X/Y coordinates for sky projection."""
@@ -1525,18 +1612,18 @@ class AstronomyTrackerWindow(QMainWindow):
             hist_xs = [point[0] for point in history_xy]
             hist_ys = [point[1] for point in history_xy]
             self.sky_history_curve.setData(hist_xs, hist_ys)
-        # Choose whether to display the live sample or a preview sample.
-        display_sample = sample
+        # Choose whether to display the live sample, history, or prediction.
+        selection = self._current_timeline_selection(sample)
+        display_sample = selection.sample
         marker_label_prefix = "LIVE"
-        marker_color = "#22c55e" if sample.el_deg > 0 else "#ef4444"
-        if not self.follow_live_projection and self.predicted_samples:
-            offset_minutes = int(self.timeline_slider.value())
-            prediction_index = min(
-                len(self.predicted_samples) - 1,
-                offset_minutes // self.prediction_step_minutes,
-            )
-            display_sample = self.predicted_samples[prediction_index]
-            marker_label_prefix = f"T+{offset_minutes}m"
+        marker_color = "#22c55e" if display_sample.el_deg > 0 else "#ef4444"
+        if selection.kind == "history":
+            marker_label_prefix = f"T{selection.offset_minutes}m"
+            marker_color = "#38bdf8"
+        elif selection.kind == "prediction":
+            marker_label_prefix = f"T+{selection.offset_minutes}m"
+            marker_color = "#38bdf8"
+        elif selection.preview:
             marker_color = "#38bdf8"
         # Update the marker position and annotation.
         marker_x, marker_y = self._sky_xy_from_altaz(
@@ -1574,7 +1661,7 @@ class AstronomyTrackerWindow(QMainWindow):
         def action() -> tuple[
             dict[str, float | None], dict[datetime, dict[str, float | None]]
         ]:
-            return self.fetcher.fetch_open_meteo_weather(location)
+            return request_tasks.fetch_open_meteo_weather_task(location)
 
         thread = RequestThread(action, self)
         self.weather_request_thread = thread
@@ -1595,7 +1682,7 @@ class AstronomyTrackerWindow(QMainWindow):
         location = self.state.location
 
         def action() -> list[EphemerisSample]:
-            return self.fetcher.fetch_ephemeris_range(
+            return request_tasks.fetch_ephemeris_range_task(
                 target_command=target_command,
                 location=location,
                 start_time=start_time,
@@ -1620,7 +1707,7 @@ class AstronomyTrackerWindow(QMainWindow):
         location = self.state.location
 
         def action() -> list[EphemerisSample]:
-            return self.fetcher.fetch_ephemeris_range(
+            return request_tasks.fetch_ephemeris_range_task(
                 target_command=target_command,
                 location=location,
                 start_time=start_time,
@@ -1633,6 +1720,15 @@ class AstronomyTrackerWindow(QMainWindow):
         thread.result_ready.connect(self._handle_history_24hr_result)
         thread.error_occurred.connect(self._handle_history_24hr_error)
         thread.start()
+
+    def _sync_timeline_range(self) -> None:
+        history_count = max(
+            0, (len(self.history_24hr_samples) - 1) * self.history_step_minutes
+        )
+        future_count = max(
+            0, (len(self.predicted_samples) - 1) * self.prediction_step_minutes
+        )
+        self.timeline_slider.setRange(-history_count, future_count)
 
     @Slot(object)
     def _handle_prediction_result(self, payload: object) -> None:
@@ -1647,9 +1743,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.predicted_samples = rows
         self.last_prediction_anchor_utc = rows[0].utc_time
         self._update_prediction_plot_curves()
-        history_count = len(self.history_24hr_samples) * self.history_step_minutes
-        future_count = len(rows) * self.prediction_step_minutes
-        self.timeline_slider.setRange(-history_count, future_count)
+        self._sync_timeline_range()
         self.back_to_live_button.setEnabled(not self.follow_live_projection)
         if self.state.latest_sample:
             self._update_sky_projection(self.state.latest_sample)
@@ -1673,14 +1767,12 @@ class AstronomyTrackerWindow(QMainWindow):
             self._append_log("[WARN] 24hr history returned no samples.")
             return
         self.history_24hr_samples = rows
-        self.history_24hr_observation_scores = [
-            float(self._evaluate_observation(row).score) for row in rows
-        ]
-        self.history_24hr_weather_scores = [
-            100.0 * float(self._evaluate_observation(row).subscores.get("weather", 0.0))
-            for row in rows
-        ]
+        (
+            self.history_24hr_observation_scores,
+            self.history_24hr_weather_scores,
+        ) = score_series(rows, self._evaluate_observation)
         self._update_history_24hr_plot_curves()
+        self._sync_timeline_range()
         self._append_log(
             f"History 24hr loaded: {len(rows)} samples for the past {self.history_horizon_minutes // 60}h."
         )
@@ -1747,7 +1839,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.load_ip_button.setEnabled(False)
 
         def action() -> tuple[ObserverLocation, str]:
-            return self.fetcher.fetch_ip_location()
+            return request_tasks.fetch_ip_location_task()
 
         thread = RequestThread(action, self)
         self.pending_request_thread = thread
@@ -1784,6 +1876,30 @@ class AstronomyTrackerWindow(QMainWindow):
     def _handle_request_error(self, message: str) -> None:
         self._set_error_state(message)
 
+    def _request_threads(self) -> list[RequestThread | None]:
+        return [
+            self.pending_request_thread,
+            self.prediction_request_thread,
+            self.history_request_thread,
+            self.weather_request_thread,
+        ]
+
+    def _disconnect_request_thread(self, thread: RequestThread) -> None:
+        for signal in (thread.result_ready, thread.error_occurred, thread.finished):
+            try:
+                signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+
+    def _stop_request_threads(self, timeout_ms: int = 1000) -> None:
+        for thread in self._request_threads():
+            if thread is None:
+                continue
+            self._disconnect_request_thread(thread)
+            if thread.isRunning():
+                thread.requestInterruption()
+                thread.wait(timeout_ms)
+
     @Slot()
     def start_tracking(self) -> None:
         if self.tracking_thread and self.tracking_thread.isRunning():
@@ -1796,7 +1912,9 @@ class AstronomyTrackerWindow(QMainWindow):
         interval_sec = self._current_interval_from_controls()
         self.state.location = location
         self.state.refresh_interval_sec = interval_sec
-        self.tracking_thread = TrackingThread(self.fetcher, self.state, self)
+        self.tracking_thread = TrackingThread(
+            self.state, fetcher_factory=self.fetcher_factory, parent=self
+        )
         self.tracking_thread.sample_ready.connect(self._update_sample_display)
         self.tracking_thread.error_occurred.connect(self._set_error_state)
         self.tracking_thread.status_message.connect(self._update_status_banner)
@@ -1834,6 +1952,7 @@ class AstronomyTrackerWindow(QMainWindow):
 
     @Slot()
     def stop_tracking(self) -> None:
+        self._stop_request_threads(timeout_ms=1000)
         if self.tracking_thread and self.tracking_thread.isRunning():
             self._append_log("Stopping tracking...")
             self.tracking_thread.request_stop()
@@ -1847,6 +1966,7 @@ class AstronomyTrackerWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         """Ensure background threads are stopped before closing the window."""
+        self._stop_request_threads(timeout_ms=5000)
         if self.tracking_thread and self.tracking_thread.isRunning():
             self.tracking_thread.request_stop()
             self.tracking_thread.wait(5000)

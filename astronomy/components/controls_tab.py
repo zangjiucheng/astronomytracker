@@ -18,7 +18,7 @@ live on the main window.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
@@ -66,7 +66,7 @@ class ControlsTab(QWidget):
         self.window.interval_spin.setSingleStep(1.0)
         self.window.interval_spin.setSuffix(" s")
 
-        self.window.load_ip_button = QPushButton("IP")
+        self.window.load_ip_button = QPushButton("Use Current IP")
         self.window.load_ip_button.setObjectName("secondaryButton")
 
         self.window.start_button = QPushButton("Start")
@@ -90,7 +90,7 @@ class ControlsTab(QWidget):
             self.window.stop_button,
             self.window.load_ip_button,
         ]:
-            btn.setMaximumWidth(60)
+            btn.setMaximumWidth(120)
             btn.setMinimumHeight(26)
 
         row1.addWidget(target_name)
@@ -142,7 +142,7 @@ class ControlsTab(QWidget):
         outer.addLayout(row2)
 
         row3 = QHBoxLayout()
-        row3.setSpacing(10)
+        row3.setSpacing(12)
 
         mount_label = QLabel("Mount")
         mount_label.setObjectName("sectionTitleCompact")
@@ -150,18 +150,18 @@ class ControlsTab(QWidget):
         self.window.mount_combo = QComboBox()
         self.window.mount_combo.setObjectName("mountCombo")
         self.window.mount_combo.addItems(["None", "Serial (USB)", "TCP/IP"])
-        self.window.mount_combo.setFixedSize(100, 26)
+        self.window.mount_combo.setFixedSize(150, 30)
 
         self.window.mount_port_edit = QLineEdit("/dev/ttyUSB0")
         self.window.mount_port_edit.setPlaceholderText("Port or Host")
-        self.window.mount_port_edit.setFixedSize(120, 26)
-        self.window.mount_port_edit.setMaximumWidth(120)
+        self.window.mount_port_edit.setFixedSize(128, 30)
+        self.window.mount_port_edit.setMaximumWidth(128)
 
         self.window.mount_port_edit.setEnabled(False)
 
         self.window.mount_connect_btn = QPushButton("Connect")
         self.window.mount_connect_btn.setObjectName("secondaryButton")
-        self.window.mount_connect_btn.setFixedSize(80, 26)
+        self.window.mount_connect_btn.setFixedSize(84, 30)
         self.window.mount_connect_btn.setEnabled(False)
 
         self.window.mount_status_label = QLabel("Disconnected")
@@ -170,12 +170,12 @@ class ControlsTab(QWidget):
 
         self.window.mount_goto_btn = QPushButton("Goto")
         self.window.mount_goto_btn.setObjectName("secondaryButton")
-        self.window.mount_goto_btn.setFixedSize(60, 26)
+        self.window.mount_goto_btn.setFixedSize(64, 30)
         self.window.mount_goto_btn.setEnabled(False)
 
         self.window.mount_sync_btn = QPushButton("Sync")
         self.window.mount_sync_btn.setObjectName("secondaryButton")
-        self.window.mount_sync_btn.setFixedSize(60, 26)
+        self.window.mount_sync_btn.setFixedSize(64, 30)
         self.window.mount_sync_btn.setEnabled(False)
 
         row3.addWidget(mount_label)

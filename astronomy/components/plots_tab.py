@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -50,27 +51,33 @@ class PlotsTab(QWidget):
         plot_layout.setContentsMargins(18, 18, 18, 18)
         plot_layout.setSpacing(12)
 
-        header_row = QVBoxLayout()
-        header_row.setSpacing(4)
-
         sky_title = self.window._section_title("Sky Projection (Alt-Az)")
-        reset_sky_btn = QPushButton("Reset")
+        reset_sky_btn = QPushButton("Reset Sky Projection")
         reset_sky_btn.setObjectName("ghostButton")
-        reset_sky_btn.setMaximumWidth(50)
+        reset_sky_btn.setFixedSize(155, 30)
         reset_sky_btn.clicked.connect(self._reset_sky)
-        sky_title_h = QVBoxLayout()
-        sky_title_h.addWidget(sky_title)
-        sky_title_h.addWidget(reset_sky_btn)
-        sky_title_h.addStretch(1)
-        plot_layout.addLayout(sky_title_h)
+        sky_title_row = QHBoxLayout()
+        sky_title_row.setContentsMargins(0, 0, 0, 0)
+        sky_title_row.setSpacing(10)
+        sky_title_row.addWidget(sky_title)
+        sky_title_row.addStretch(1)
+        sky_title_row.addWidget(reset_sky_btn, 0, Qt.AlignmentFlag.AlignRight)
+        plot_layout.addLayout(sky_title_row)
 
         plot_layout.addWidget(self.window.sky_plot)
-        plot_layout.addWidget(self.window._section_title("Live Plot"))
 
+        live_title = self.window._section_title("Live Plot")
         reset_all_btn = QPushButton("Reset All Plots")
         reset_all_btn.setObjectName("ghostButton")
+        reset_all_btn.setFixedSize(120, 30)
         reset_all_btn.clicked.connect(self._reset_all_plots)
-        plot_layout.addWidget(reset_all_btn, 0, Qt.AlignmentFlag.AlignRight)
+        live_title_row = QHBoxLayout()
+        live_title_row.setContentsMargins(0, 0, 0, 0)
+        live_title_row.setSpacing(10)
+        live_title_row.addWidget(live_title)
+        live_title_row.addStretch(1)
+        live_title_row.addWidget(reset_all_btn, 0, Qt.AlignmentFlag.AlignRight)
+        plot_layout.addLayout(live_title_row)
 
         plot_layout.addWidget(self.window.elevation_plot)
         plot_layout.addWidget(self.window.azimuth_plot)

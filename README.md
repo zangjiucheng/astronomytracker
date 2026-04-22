@@ -32,9 +32,14 @@ This project provides reusable components for tracking astronomical targets with
 - `astronomy/gui.py` - PySide6 GUI, live plotting, forecast timeline
 - `astronomy/api_fetcher.py` - Horizons + geolocation API client
 - `astronomy/horizons_parser.py` - Horizons response parsing
+- `astronomy/timeline.py` - Timeline sample selection helpers
+- `astronomy/request_tasks.py` - Background request task wrappers
 - `astronomy/tracker_state.py` - Shared state/data models
 - `astronomy/static/` - Static assets (icon, screenshots)
 - `moon_tracker.py` - Moon launcher
+- `mars_tracker.py` - Mars launcher
+- `venus_tracker.py` - Venus launcher
+- `ISS_tracker.py` - International Space Station launcher
 - `c2025r3_tracker.py` - C/2025 R3 launcher
 - `target_command.md` - Horizons command reference notes
 - `requirements.txt` - Python dependencies
@@ -64,6 +69,14 @@ Run C/2025 R3 tracker:
 python c2025r3_tracker.py
 ```
 
+Other included launchers:
+
+```bash
+python mars_tracker.py
+python venus_tracker.py
+python ISS_tracker.py
+```
+
 ## Creating a New Tracker
 
 Create a new launcher file (example: `my_target_tracker.py`):
@@ -79,7 +92,7 @@ APP_CONFIG = TrackerAppConfig(
     header_title="My Target Real-Time Tracker",
     header_subtitle="PySide6 desktop tracker with live JPL Horizons sampling.",
     target_name="My Target",
-  scorer_target_type="deep_sky",  # or: near_solar_comet / planet / default
+    scorer_target_type="deep_sky",  # or: near_solar_comet / planet / moon / default
 )
 
 INITIAL_STATE = TrackerState(
