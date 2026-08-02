@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 from astronomy.math_utils import clamp
@@ -32,6 +33,10 @@ class ObservationContext:
     azimuth: Optional[float] = None
     magnitude: Optional[float] = None
     target_name: Optional[str] = None
+
+    # Sample time, for scorers whose rating depends on the date rather than
+    # only on the instantaneous geometry (meteor shower activity, for example).
+    observation_time: Optional[datetime] = None
 
 
 @dataclass

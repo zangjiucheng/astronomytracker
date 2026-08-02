@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Callable
 
 from astronomy.api_fetcher import HorizonsFetcher
 from astronomy.tracker_state import EphemerisSample, ObserverLocation
+
+# Any object exposing the HorizonsFetcher ephemeris methods, so targets without
+# a Horizons ephemeris can supply their own provider.
+FetcherFactory = Callable[[], HorizonsFetcher]
+
+
+def _resolve(fetcher_factory: FetcherFactory | None) -> HorizonsFetcher:
+    # Looked up at call time rather than bound as a default argument so the
+    # module attribute stays patchable.
+    return (fetcher_factory or HorizonsFetcher)()
 
 
 def fetch_current_ephemeris_task(
     target_command: str,
     location: ObserverLocation,
     observation_time: datetime | None = None,
+    fetcher_factory: FetcherFactory | None = None,
 ) -> EphemerisSample:
-    return HorizonsFetcher().fetch_current_ephemeris(
+    return _resolve(fetcher_factory).fetch_current_ephemeris(
         target_command=target_command,
         location=location,
         observation_time=observation_time,
@@ -25,8 +37,9 @@ def fetch_ephemeris_range_task(
     start_time: datetime,
     stop_time: datetime,
     step_minutes: int,
+    fetcher_factory: FetcherFactory | None = None,
 ) -> list[EphemerisSample]:
-    return HorizonsFetcher().fetch_ephemeris_range(
+    return _resolve(fetcher_factory).fetch_ephemeris_range(
         target_command=target_command,
         location=location,
         start_time=start_time,

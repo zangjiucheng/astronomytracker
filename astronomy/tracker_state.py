@@ -53,6 +53,14 @@ class EphemerisSample:
     solar_presence: str
     interferer_presence: str
     solar_alignment_code: str
+    # Set by providers that know the real sky circumstances rather than only
+    # the Horizons twilight/interference marker letters. When present these are
+    # preferred for observation scoring; when absent the marker letters are
+    # still used as a coarse fallback.
+    sun_alt_deg: float | None = None
+    moon_alt_deg: float | None = None
+    moon_illumination: float | None = None
+    moon_separation_deg: float | None = None
 
 
 @dataclass

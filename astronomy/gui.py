@@ -28,6 +28,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -36,6 +37,7 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
     QIcon,
     QPainter,
     QPainterPath,
@@ -81,6 +83,22 @@ from .components.plots_tab import PlotsTab
 pg.setConfigOptions(antialias=True)
 
 
+# Preferred monospace faces, best first. "SF Mono" is a separate download on
+# macOS rather than a system font, so asking for it unconditionally makes Qt
+# scan every installed family building alias tables before giving up.
+_MONOSPACE_PREFERENCES = ("SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono")
+
+
+@lru_cache(maxsize=1)
+def monospace_family() -> str:
+    """First installed family from the preference list, else the system fixed font."""
+    available = set(QFontDatabase.families())
+    for family in _MONOSPACE_PREFERENCES:
+        if family in available:
+            return family
+    return QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+
+
 @dataclass(frozen=True)
 class TrackerAppConfig:
     app_name: str = "Astronomy Tracker"
@@ -90,6 +108,11 @@ class TrackerAppConfig:
     header_subtitle: str = "PySide6 desktop tracker with live JPL Horizons sampling, historical log, and azimuth/elevation plot."
     target_name: str = "Target"
     scorer_target_type: str = "default"
+    # Ephemeris provider. Targets without a Horizons ephemeris (meteor shower
+    # radiants) supply their own; see astronomy/meteor_fetcher.py.
+    fetcher_factory: Callable[[], HorizonsFetcher] = HorizonsFetcher
+    # Look the observer's location up from their IP as soon as the window opens.
+    auto_ip_location: bool = False
 
 
 class RequestThread(QThread):
@@ -172,9 +195,11 @@ class AstronomyTrackerWindow(QMainWindow):
         self, state: TrackerState | None = None, config: TrackerAppConfig | None = None
     ) -> None:
         super().__init__()
-        self.fetcher_factory: Callable[[], HorizonsFetcher] = HorizonsFetcher
         self.state = state or TrackerState()
         self.config = config or TrackerAppConfig()
+        self.fetcher_factory: Callable[[], HorizonsFetcher] = (
+            self.config.fetcher_factory
+        )
         # Limits on history and plot buffers.
         self.history_limit = 400
         self.plot_limit = 180
@@ -227,6 +252,10 @@ class AstronomyTrackerWindow(QMainWindow):
         self._update_status_banner(
             "Ready. Enter coordinates or use IP location, then start tracking."
         )
+        if self.config.auto_ip_location:
+            # Deferred so the lookup runs once the event loop is up rather than
+            # blocking the window from appearing.
+            QTimer.singleShot(0, self.load_ip_location)
 
     # -----------------------------------------------------------------
     # UI construction
@@ -601,7 +630,7 @@ class AstronomyTrackerWindow(QMainWindow):
                 border: 1px solid #17304d;
                 border-radius: 12px;
                 padding: 10px;
-                font-family: SF Mono, Menlo, Consolas, monospace;
+                font-family: __MONO_FONT__;
                 font-size: 12px;
             }
             QScrollBar:vertical {
@@ -631,6 +660,7 @@ class AstronomyTrackerWindow(QMainWindow):
             }
             """
             .replace("__COMBO_ARROW__", combo_arrow_path)
+            .replace("__MONO_FONT__", monospace_family())
         )
 
     def _bind_signals(self) -> None:
@@ -758,7 +788,7 @@ class AstronomyTrackerWindow(QMainWindow):
             self._score_hover_text = pg.TextItem(
                 "", color="#fbbf24", anchor=(0.5, 1.3), fill=pg.mkBrush("#0f172a")
             )
-            self._score_hover_text.setFont(QFont("SF Mono", 9))
+            self._score_hover_text.setFont(QFont(monospace_family(), 9))
             self.score_plot.addItem(self._score_hover_text)
         self._score_hover_text.setText(label)
         self._score_hover_text.setPos(pt.pos().x(), pt.pos().y())
@@ -775,7 +805,7 @@ class AstronomyTrackerWindow(QMainWindow):
             self._weather_hover_text = pg.TextItem(
                 "", color="#22d3ee", anchor=(0.5, 1.3), fill=pg.mkBrush("#0f172a")
             )
-            self._weather_hover_text.setFont(QFont("SF Mono", 9))
+            self._weather_hover_text.setFont(QFont(monospace_family(), 9))
             self.weather_plot.addItem(self._weather_hover_text)
         self._weather_hover_text.setText(label)
         self._weather_hover_text.setPos(pt.pos().x(), pt.pos().y())
@@ -841,6 +871,8 @@ class AstronomyTrackerWindow(QMainWindow):
     # Observation scoring helpers
     # -----------------------------------------------------------------
     def _estimate_sun_altitude(self, sample: EphemerisSample) -> float:
+        if sample.sun_alt_deg is not None:
+            return sample.sun_alt_deg
         token = sample.solar_presence.upper()
         if "*" in token:
             return 10.0
@@ -855,6 +887,16 @@ class AstronomyTrackerWindow(QMainWindow):
     def _estimate_moon_context(
         self, sample: EphemerisSample
     ) -> tuple[float, float, float]:
+        if sample.moon_alt_deg is not None:
+            return (
+                sample.moon_alt_deg,
+                sample.moon_illumination
+                if sample.moon_illumination is not None
+                else 0.0,
+                sample.moon_separation_deg
+                if sample.moon_separation_deg is not None
+                else 180.0,
+            )
         marker = sample.interferer_presence.lower()
         if "m" in marker:
             return 20.0, 0.7, 35.0
@@ -891,6 +933,7 @@ class AstronomyTrackerWindow(QMainWindow):
             azimuth=sample.az_deg,
             magnitude=None,
             target_name=self.config.target_name,
+            observation_time=sample.utc_time,
         )
 
     def _weather_for_time(self, t: datetime) -> dict[str, float | None]:
@@ -1131,9 +1174,13 @@ class AstronomyTrackerWindow(QMainWindow):
         )
         limiting = score_result.limiting_factor or "none"
         self.visibility_summary.setText(score_result.status)
-        self.score_summary.setText(
-            f"Score {score_result.score}/100 | Limiting: {limiting}"
-        )
+        summary = f"Score {score_result.score}/100 | Limiting: {limiting}"
+        if score_result.custom_scores:
+            summary += " | " + " | ".join(
+                f"{name.replace('_', ' ')}: {value:g}"
+                for name, value in score_result.custom_scores.items()
+            )
+        self.score_summary.setText(summary)
 
     def _update_sample_display(self, sample: EphemerisSample) -> None:
         self.state.latest_sample = sample
@@ -1680,6 +1727,7 @@ class AstronomyTrackerWindow(QMainWindow):
         stop_time = start_time + timedelta(minutes=self.prediction_horizon_minutes)
         target_command = self.state.target_command
         location = self.state.location
+        fetcher_factory = self.fetcher_factory
 
         def action() -> list[EphemerisSample]:
             return request_tasks.fetch_ephemeris_range_task(
@@ -1688,6 +1736,7 @@ class AstronomyTrackerWindow(QMainWindow):
                 start_time=start_time,
                 stop_time=stop_time,
                 step_minutes=self.prediction_step_minutes,
+                fetcher_factory=fetcher_factory,
             )
 
         thread = RequestThread(action, self)
@@ -1705,6 +1754,7 @@ class AstronomyTrackerWindow(QMainWindow):
         start_time = anchor - timedelta(minutes=self.history_horizon_minutes)
         target_command = self.state.target_command
         location = self.state.location
+        fetcher_factory = self.fetcher_factory
 
         def action() -> list[EphemerisSample]:
             return request_tasks.fetch_ephemeris_range_task(
@@ -1713,6 +1763,7 @@ class AstronomyTrackerWindow(QMainWindow):
                 start_time=start_time,
                 stop_time=stop_time,
                 step_minutes=self.history_step_minutes,
+                fetcher_factory=fetcher_factory,
             )
 
         thread = RequestThread(action, self)

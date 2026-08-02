@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Callable
 
+from astronomy.meteor_showers import SHOWERS
 from astronomy.observation_scorer import BaseObservationScorer
 from astronomy.scorers import (
     BaseFallbackScorer,
     DeepSkyScorer,
+    MeteorShowerScorer,
     MoonScorer,
     NearSolarCometScorer,
     PlanetScorer,
@@ -20,7 +22,17 @@ _SCORER_REGISTRY: dict[str, ScorerFactory] = {
     "deep_sky": DeepSkyScorer,
     "planet": PlanetScorer,
     "moon": MoonScorer,
+    # Resolves its shower from the target name at scoring time.
+    "meteor_shower": MeteorShowerScorer,
 }
+
+# One scorer type per shower, e.g. "meteor_shower_per" for the Perseids, so a
+# launcher can bind its shower without depending on the target name string.
+for _shower in SHOWERS:
+    _SCORER_REGISTRY[f"meteor_shower_{_shower.code.lower()}"] = (
+        lambda bound=_shower: MeteorShowerScorer(bound)
+    )
+del _shower
 
 
 def register_scorer(target_type: str, scorer_factory: ScorerFactory) -> None:

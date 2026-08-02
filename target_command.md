@@ -76,3 +76,42 @@ https://ssd.jpl.nasa.gov/
 
 * Those require Horizons support for TLE
 * Sometimes you may need to use different modes (but your current setup should work directly)
+
+---
+
+## Meteor Showers
+
+Meteor showers are **not** Horizons targets. A shower is a debris stream, not a
+body, so there is nothing to compute an ephemeris for. These use a separate
+provider (`astronomy.meteor_fetcher.MeteorRadiantFetcher`) that computes the
+radiant position locally, and a `SHOWER=<IAU code>` command instead.
+
+| Shower                   | target_command | Peak (solar longitude) | Peak ZHR |
+| ------------------------ | -------------- | ---------------------- | -------- |
+| Quadrantids              | `SHOWER=QUA`   | 283.15 deg (~Jan 3)    | 110      |
+| Lyrids                   | `SHOWER=LYR`   | 32.32 deg (~Apr 22)    | 18       |
+| eta Aquariids            | `SHOWER=ETA`   | 45.5 deg (~May 6)      | 50       |
+| Southern delta Aquariids | `SHOWER=SDA`   | 125.0 deg (~Jul 30)    | 25       |
+| Perseids                 | `SHOWER=PER`   | 140.0 deg (~Aug 12)    | 100      |
+| Draconids                | `SHOWER=DRA`   | 195.4 deg (~Oct 8)     | 5        |
+| Orionids                 | `SHOWER=ORI`   | 208.0 deg (~Oct 21)    | 20       |
+| Leonids                  | `SHOWER=LEO`   | 235.27 deg (~Nov 17)   | 15       |
+| Geminids                 | `SHOWER=GEM`   | 262.2 deg (~Dec 14)    | 150      |
+| Ursids                   | `SHOWER=URS`   | 270.7 deg (~Dec 22)    | 10       |
+
+* Calendar dates are approximate; the solar longitude is the fixed quantity and
+  the date it falls on shifts by up to a day across the leap-year cycle. Call
+  `MeteorShower.next_peak()` for the exact time in a given year.
+* Bare codes and names also resolve, so `SHOWER=PER`, `PER`, and `Perseids` are
+  equivalent.
+* A shower launcher must set `fetcher_factory=MeteorRadiantFetcher` in its
+  `TrackerAppConfig`; a `SHOWER=` command sent to Horizons will not resolve.
+
+```text
+SHOWER=<IAU code>
+```
+
+Note that the parent bodies **are** valid Horizons targets, but tracking one
+tells you nothing about where to watch: 109P/Swift-Tuttle, the Perseids' parent,
+is currently far beyond Saturn's orbit while its debris hits the atmosphere
+100 km overhead.

@@ -26,12 +26,16 @@ This project provides reusable components for tracking astronomical targets with
 - Rolling sample log panel
 - Rounded app/window icon support from `astronomy/static/solar_system.jpg`
 - Modular launcher-based target setup
+- Meteor shower tracking with radiant position, activity profile, and estimated hourly rate
 
 ## Project Structure
 
 - `astronomy/gui.py` - PySide6 GUI, live plotting, forecast timeline
 - `astronomy/api_fetcher.py` - Horizons + geolocation API client
 - `astronomy/horizons_parser.py` - Horizons response parsing
+- `astronomy/celestial.py` - Local sun/moon/sidereal-time math for targets Horizons cannot serve
+- `astronomy/meteor_showers.py` - Radiant and activity data for the major annual showers
+- `astronomy/meteor_fetcher.py` - Locally computed radiant ephemeris provider
 - `astronomy/timeline.py` - Timeline sample selection helpers
 - `astronomy/request_tasks.py` - Background request task wrappers
 - `astronomy/tracker_state.py` - Shared state/data models
@@ -41,6 +45,7 @@ This project provides reusable components for tracking astronomical targets with
 - `venus_tracker.py` - Venus launcher
 - `ISS_tracker.py` - International Space Station launcher
 - `c2025r3_tracker.py` - C/2025 R3 launcher
+- `perseids_tracker.py` - Perseid meteor shower launcher
 - `target_command.md` - Horizons command reference notes
 - `requirements.txt` - Python dependencies
 
@@ -69,12 +74,66 @@ Run C/2025 R3 tracker:
 python c2025r3_tracker.py
 ```
 
+Run the Perseid meteor shower tracker:
+
+```bash
+python perseids_tracker.py
+```
+
 Other included launchers:
 
 ```bash
 python mars_tracker.py
 python venus_tracker.py
 python ISS_tracker.py
+```
+
+## Meteor Showers
+
+A meteor shower has no Horizons ephemeris: it is not a body but a stream of
+debris the Earth passes through, seen as meteors diverging from a fixed radiant.
+`astronomy/meteor_fetcher.py` computes the radiant position locally instead, so
+shower trackers need no network access for their ephemeris and produce the
+24-hour forecast instantly.
+
+Ten showers are tabulated in `astronomy/meteor_showers.py` (Quadrantids, Lyrids,
+eta Aquariids, Southern delta Aquariids, Perseids, Draconids, Orionids, Leonids,
+Geminids, Ursids). Each carries its radiant and nightly drift, peak solar
+longitude, activity profile, and population index.
+
+Showers are scored differently from point targets, because:
+
+- Meteors appear all over the sky, so the Moon's distance from the radiant is
+  irrelevant and solar elongation is meaningless. Only sky brightness matters.
+- The rate scales with the sine of the radiant's altitude.
+- The date matters on its own. A well-placed radiant under a clear sky is still
+  a quiet night two weeks off the stream's peak.
+
+Alongside the usual 0-100 score, the shower scorer reports an estimated
+`meteors/hr`, the current `ZHR`, and the assumed `limiting mag`. The rate
+assumes a magnitude 6.0 sky; a darker site yields more, a light-polluted one
+fewer.
+
+To track a different shower, point a launcher at its code:
+
+```python
+from astronomy.meteor_fetcher import MeteorRadiantFetcher
+from astronomy.meteor_showers import get_shower, shower_target_command
+
+GEMINIDS = get_shower("GEM")
+
+APP_CONFIG = TrackerAppConfig(
+    target_name=GEMINIDS.name,
+    scorer_target_type="meteor_shower_gem",
+    fetcher_factory=MeteorRadiantFetcher,
+    auto_ip_location=True,
+    # ... remaining fields as usual
+)
+
+INITIAL_STATE = TrackerState(
+    target_command=shower_target_command(GEMINIDS),  # "SHOWER=GEM"
+    location=ObserverLocation(43.2557, -79.8711, 0.10),
+)
 ```
 
 ## Creating a New Tracker
@@ -92,7 +151,8 @@ APP_CONFIG = TrackerAppConfig(
     header_title="My Target Real-Time Tracker",
     header_subtitle="PySide6 desktop tracker with live JPL Horizons sampling.",
     target_name="My Target",
-    scorer_target_type="deep_sky",  # or: near_solar_comet / planet / moon / default
+    # or: near_solar_comet / planet / moon / meteor_shower_<code> / default
+    scorer_target_type="deep_sky",
 )
 
 INITIAL_STATE = TrackerState(
@@ -107,7 +167,8 @@ if __name__ == "__main__":
 
 ## Target Configuration
 
-Targets are defined using JPL Horizons command syntax.
+Targets are defined using JPL Horizons command syntax, except meteor showers,
+which use `SHOWER=<IAU code>`.
 
 See `target_command.md` for examples and formatting rules.
 
@@ -116,6 +177,10 @@ See `target_command.md` for examples and formatting rules.
 - Invalid `target_command` values fail at Horizons resolution.
 - Update cadence depends on API latency/network quality.
 - Forecast quality depends on Horizons data availability.
+- Meteor shower radiants are computed locally, so they need no network access
+  and work offline apart from weather and IP geolocation.
+- Shower ZHR, slope, and population index figures are approximate literature
+  values describing a typical return, not a prediction for a specific year.
 
 ## Credits
 - JPL Horizons: https://ssd.jpl.nasa.gov/horizons/
