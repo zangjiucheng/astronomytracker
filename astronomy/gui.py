@@ -61,6 +61,13 @@ from PySide6.QtWidgets import (
 )
 
 from astronomy.api_fetcher import HorizonsFetcher
+from astronomy.forecast import (
+    DEFAULT_HORIZON_MINUTES,
+    FORECAST_HORIZONS,
+    format_duration,
+    refresh_seconds_for_horizon,
+    step_for_horizon,
+)
 from astronomy.observation_scorer import ObservationContext, ObservationScoreResult
 from astronomy.plot_data import score_series
 from astronomy import request_tasks
@@ -113,6 +120,9 @@ class TrackerAppConfig:
     fetcher_factory: Callable[[], HorizonsFetcher] = HorizonsFetcher
     # Look the observer's location up from their IP as soon as the window opens.
     auto_ip_location: bool = False
+    # How far ahead the forecast reaches on startup. Selectable at runtime from
+    # the Forecast control; see astronomy.forecast.FORECAST_HORIZONS.
+    prediction_horizon_minutes: int = DEFAULT_HORIZON_MINUTES
 
 
 class RequestThread(QThread):
@@ -203,16 +213,26 @@ class AstronomyTrackerWindow(QMainWindow):
         # Limits on history and plot buffers.
         self.history_limit = 400
         self.plot_limit = 180
+        # Visible span of the time-series plots, centred on whatever moment is
+        # being displayed. Zooming changes it; the forecast horizon does not.
+        self.plot_window_minutes = 60
+        self._centered_timestamp: float | None = None
         self.log_lines: deque[str] = deque(maxlen=self.history_limit)
         self.timestamps: deque[float] = deque(maxlen=self.plot_limit)
         self.azimuths: deque[float] = deque(maxlen=self.plot_limit)
         self.elevations: deque[float] = deque(maxlen=self.plot_limit)
         self.observation_scores: deque[float] = deque(maxlen=self.plot_limit)
         self.weather_scores: deque[float] = deque(maxlen=self.plot_limit)
-        # Prediction settings.
-        self.prediction_horizon_minutes = 24 * 60
-        self.prediction_step_minutes = 5
-        self.prediction_refresh_seconds = 300
+        # Prediction settings. Step and refresh cadence follow from the horizon
+        # so that reaching further ahead widens the sampling interval instead of
+        # multiplying the work.
+        self.prediction_horizon_minutes = self.config.prediction_horizon_minutes
+        self.prediction_step_minutes = self._step_for_horizon(
+            self.prediction_horizon_minutes
+        )
+        self.prediction_refresh_seconds = self._refresh_for_horizon(
+            self.prediction_horizon_minutes
+        )
         # History settings for past 24hr data.
         self.history_horizon_minutes = 24 * 60
         self.history_step_minutes = 5
@@ -670,6 +690,9 @@ class AstronomyTrackerWindow(QMainWindow):
         self.load_ip_button.clicked.connect(self.load_ip_location)
         self.timeline_slider.valueChanged.connect(self._on_timeline_slider_changed)
         self.back_to_live_button.clicked.connect(self._set_projection_live)
+        self.forecast_combo.currentIndexChanged.connect(
+            self._on_forecast_horizon_changed
+        )
         self.score_scatter.sigHovered.connect(self._on_score_hovered)
         self.score_prediction_scatter.sigHovered.connect(self._on_score_hovered)
         self.weather_scatter.sigHovered.connect(self._on_weather_hovered)
@@ -949,6 +972,11 @@ class AstronomyTrackerWindow(QMainWindow):
                     best_data = fw
             if best_data is not None:
                 return best_data
+            # Past the end of the weather forecast. Returning present
+            # conditions here would score a night weeks away by today's cloud
+            # cover, so the sample is left to fall back on neutral defaults.
+            if t > max(self.hourly_forecast) or t < min(self.hourly_forecast):
+                return {}
         current = self.latest_weather
         if current:
             return current
@@ -1044,12 +1072,45 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuth_cursor.setVisible(True)
         self.score_cursor.setVisible(True)
         self.weather_cursor.setVisible(True)
+        self._center_plot_window(timestamp)
 
     def _set_initial_plot_time_window(self) -> None:
-        now_ts = datetime.now(timezone.utc).timestamp()
-        half_window_sec = 30 * 60
+        self._center_plot_window(
+            datetime.now(timezone.utc).timestamp(),
+            width_sec=self.plot_window_minutes * 60.0,
+        )
+
+    def _center_plot_window(
+        self, timestamp: float, width_sec: float | None = None
+    ) -> None:
+        """
+        Put a moment in the middle of the time-series plots.
+
+        The plots cannot auto-range on x: the forecast curve may run weeks into
+        the future, which would squeeze the live trace into an invisible sliver
+        at the left edge. Instead the view holds a fixed span and slides to keep
+        the displayed moment centred. The span is whatever the user last zoomed
+        to, so panning re-centres but zooming is preserved.
+        """
+        if width_sec is None:
+            (x_min, x_max), _ = self.elevation_plot.getViewBox().viewRange()
+            width_sec = x_max - x_min
+        if not math.isfinite(width_sec) or width_sec <= 0.0:
+            width_sec = self.plot_window_minutes * 60.0
+        half = width_sec / 2.0
+        self._centered_timestamp = timestamp
+        # The other three plots are x-linked to this one and follow along.
         self.elevation_plot.setXRange(
-            now_ts - half_window_sec, now_ts + half_window_sec
+            timestamp - half, timestamp + half, padding=0
+        )
+
+    def _reset_plot_time_window(self) -> None:
+        """Restore the default visible span around the moment on screen."""
+        timestamp = self._centered_timestamp
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc).timestamp()
+        self._center_plot_window(
+            timestamp, width_sec=self.plot_window_minutes * 60.0
         )
 
     def _update_prediction_plot_curves(self) -> None:
@@ -1438,7 +1499,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.elevation_plot.setLabel("bottom", "UTC time")
         self.elevation_plot.setYRange(-90.0, 90.0)
         self.elevation_plot.setMouseEnabled(x=True, y=False)
-        self.elevation_plot.enableAutoRange(x=True, y=False)
+        self.elevation_plot.enableAutoRange(x=False, y=False)
         self.elevation_plot.setLimits(
             yMin=-90.0, yMax=90.0, minYRange=180.0, maxYRange=180.0
         )
@@ -1476,7 +1537,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.azimuth_plot.setLabel("bottom", "UTC time")
         self.azimuth_plot.setYRange(0.0, 360.0)
         self.azimuth_plot.setMouseEnabled(x=True, y=False)
-        self.azimuth_plot.enableAutoRange(x=True, y=False)
+        self.azimuth_plot.enableAutoRange(x=False, y=False)
         self.azimuth_plot.setLimits(
             yMin=0.0, yMax=360.0, minYRange=360.0, maxYRange=360.0
         )
@@ -1514,7 +1575,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.score_plot.setLabel("bottom", "UTC time")
         self.score_plot.setYRange(0.0, 100.0)
         self.score_plot.setMouseEnabled(x=True, y=False)
-        self.score_plot.enableAutoRange(x=True, y=False)
+        self.score_plot.enableAutoRange(x=False, y=False)
         self.score_plot.setLimits(
             yMin=0.0, yMax=100.0, minYRange=100.0, maxYRange=100.0
         )
@@ -1556,7 +1617,7 @@ class AstronomyTrackerWindow(QMainWindow):
         self.weather_plot.setLabel("bottom", "UTC time")
         self.weather_plot.setYRange(0.0, 100.0)
         self.weather_plot.setMouseEnabled(x=True, y=False)
-        self.weather_plot.enableAutoRange(x=True, y=False)
+        self.weather_plot.enableAutoRange(x=False, y=False)
         self.weather_plot.setLimits(
             yMin=0.0, yMax=100.0, minYRange=100.0, maxYRange=100.0
         )
@@ -1684,6 +1745,59 @@ class AstronomyTrackerWindow(QMainWindow):
         )
         self.sky_target_text.setPos(marker_x, marker_y)
 
+    # -----------------------------------------------------------------
+    # Forecast horizon
+    # -----------------------------------------------------------------
+    def _max_prediction_samples(self) -> int:
+        """How many range samples the active provider is willing to produce."""
+        return int(
+            getattr(
+                self.fetcher_factory,
+                "MAX_RANGE_SAMPLES",
+                HorizonsFetcher.MAX_RANGE_SAMPLES,
+            )
+        )
+
+    def _step_for_horizon(self, horizon_minutes: int) -> int:
+        """Sampling interval that spans the horizon within the provider's budget."""
+        return step_for_horizon(horizon_minutes, self._max_prediction_samples())
+
+    def _refresh_for_horizon(self, horizon_minutes: int) -> int:
+        """Re-request cadence, stretched in proportion to the horizon."""
+        return refresh_seconds_for_horizon(horizon_minutes)
+
+    @Slot(int)
+    def _on_forecast_horizon_changed(self, index: int) -> None:
+        if 0 <= index < len(FORECAST_HORIZONS):
+            self._apply_forecast_horizon(FORECAST_HORIZONS[index][1])
+
+    def _apply_forecast_horizon(self, horizon_minutes: int) -> None:
+        """Switch the forecast horizon and rebuild the trajectory for it."""
+        if horizon_minutes == self.prediction_horizon_minutes:
+            return
+        self.prediction_horizon_minutes = horizon_minutes
+        self.prediction_step_minutes = self._step_for_horizon(horizon_minutes)
+        self.prediction_refresh_seconds = self._refresh_for_horizon(horizon_minutes)
+
+        # The cached trajectory covers the old horizon at the old step, so it
+        # cannot be reused or the timeline would index into the wrong samples.
+        self.predicted_samples = []
+        self.predicted_observation_scores = []
+        self.predicted_weather_scores = []
+        self.last_prediction_anchor_utc = None
+        self._sync_timeline_range()
+        self._append_log(
+            f"Forecast horizon set to {format_duration(horizon_minutes)} "
+            f"at {self.prediction_step_minutes} min steps."
+        )
+
+        anchor = (
+            self.state.latest_sample.utc_time
+            if self.state.latest_sample is not None
+            else datetime.now(timezone.utc)
+        )
+        self._request_prediction_trajectory(anchor)
+
     def _should_refresh_prediction(self, sample: EphemerisSample) -> bool:
         """Return True if a new prediction trajectory should be requested."""
         if self.last_prediction_anchor_utc is None:
@@ -1799,7 +1913,9 @@ class AstronomyTrackerWindow(QMainWindow):
         if self.state.latest_sample:
             self._update_sky_projection(self.state.latest_sample)
         self._append_log(
-            f"Prediction refreshed: {len(rows)} samples for the next {self.prediction_horizon_minutes // 60}h."
+            f"Prediction refreshed: {len(rows)} samples for the next "
+            f"{format_duration(self.prediction_horizon_minutes)} "
+            f"at {self.prediction_step_minutes} min steps."
         )
 
     @Slot(str)

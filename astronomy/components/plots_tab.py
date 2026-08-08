@@ -95,10 +95,9 @@ class PlotsTab(QWidget):
 
     def _reset_all_plots(self) -> None:
         self.window.elevation_plot.setYRange(-90.0, 90.0)
-        self.window.elevation_plot.enableAutoRange(x=True, y=False)
         self.window.azimuth_plot.setYRange(0.0, 360.0)
-        self.window.azimuth_plot.enableAutoRange(x=True, y=False)
         self.window.score_plot.setYRange(0.0, 100.0)
-        self.window.score_plot.enableAutoRange(x=True, y=False)
         self.window.weather_plot.setYRange(0.0, 100.0)
-        self.window.weather_plot.enableAutoRange(x=True, y=False)
+        # Not auto-range on x: the forecast can run weeks ahead, which would
+        # shrink the live trace to nothing. Restore the default span instead.
+        self.window._reset_plot_time_window()

@@ -34,6 +34,11 @@ _KM_PER_AU = 149597870.7
 class MeteorRadiantFetcher:
     """Computes radiant ephemeris samples for a meteor shower."""
 
+    # Radiant samples are local arithmetic rather than network rows -- a few
+    # thousand take a fraction of a second -- so a shower forecast can keep a
+    # fine step over a horizon of weeks.
+    MAX_RANGE_SAMPLES = 4500
+
     def __init__(self, timeout_sec: int = 30, retries: int = 3) -> None:
         # Accepted for signature compatibility with HorizonsFetcher; only the
         # delegated network calls use them.

@@ -20,6 +20,9 @@ APP_CONFIG = TrackerAppConfig(
     # The radiant has no Horizons ephemeris; it is computed locally.
     fetcher_factory=MeteorRadiantFetcher,
     auto_ip_location=True,
+    # A week ahead by default so the maximum is in view before it arrives.
+    # Radiant samples are computed locally, so this stays at 5-minute steps.
+    prediction_horizon_minutes=7 * 24 * 60,
 )
 
 INITIAL_STATE = TrackerState(

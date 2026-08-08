@@ -23,6 +23,7 @@ This project provides reusable components for tracking astronomical targets with
 - Forecast mode:
   - Timeline preview
   - Back-to-live switching
+  - Selectable horizon from 6 hours to 30 days
 - Rolling sample log panel
 - Rounded app/window icon support from `astronomy/static/solar_system.jpg`
 - Modular launcher-based target setup
@@ -33,6 +34,7 @@ This project provides reusable components for tracking astronomical targets with
 - `astronomy/gui.py` - PySide6 GUI, live plotting, forecast timeline
 - `astronomy/api_fetcher.py` - Horizons + geolocation API client
 - `astronomy/horizons_parser.py` - Horizons response parsing
+- `astronomy/forecast.py` - Forecast horizon options and sampling-step policy
 - `astronomy/celestial.py` - Local sun/moon/sidereal-time math for targets Horizons cannot serve
 - `astronomy/meteor_showers.py` - Radiant and activity data for the major annual showers
 - `astronomy/meteor_fetcher.py` - Locally computed radiant ephemeris provider
@@ -88,6 +90,40 @@ python venus_tracker.py
 python ISS_tracker.py
 ```
 
+## Forecast Horizon
+
+The **Forecast** control next to the timeline selects how far ahead the
+projection reaches, from 6 hours to 30 days. A launcher can preset it with
+`prediction_horizon_minutes`.
+
+The sampling step is derived, not chosen: reaching further ahead widens the step
+so the request stays about the same size. Each provider declares its own budget
+via `MAX_RANGE_SAMPLES`, so a horizon costs what the provider can afford:
+
+| Horizon | Horizons target | Meteor shower radiant |
+| ------- | --------------- | --------------------- |
+| 24 hours | 5 min steps, 289 samples | 5 min steps, 289 samples |
+| 7 days   | 21 min steps, 481 samples | 5 min steps, 2017 samples |
+| 30 days  | 87 min steps, 497 samples | 10 min steps, 4321 samples |
+
+Radiant samples are local arithmetic, so a shower keeps 5-minute resolution out
+to a fortnight; a Horizons target coarsens instead of issuing a huge query. The
+refresh cadence stretches with the horizon too, since a month-long forecast does
+not change minute to minute.
+
+The time-series plots do not auto-range on the time axis, because a forecast
+running weeks ahead would squeeze the live trace into an invisible sliver. They
+hold a fixed span — one hour by default — and slide to keep the displayed moment
+centred, with live data to the left of the cursor and the forecast to the right.
+Ctrl/Cmd + scroll changes the span, and the new width is kept as the view
+follows along. Dragging the timeline moves the centre to the selected moment,
+which is how a multi-day forecast is browsed. **Reset All Plots** restores the
+default span without leaving the moment on screen.
+
+Weather comes from Open-Meteo's 16-day forecast. Samples beyond that are scored
+without weather rather than with present-day conditions, so a long forecast
+reflects astronomical circumstances only once it runs past the weather horizon.
+
 ## Meteor Showers
 
 A meteor shower has no Horizons ephemeris: it is not a body but a stream of
@@ -127,6 +163,7 @@ APP_CONFIG = TrackerAppConfig(
     scorer_target_type="meteor_shower_gem",
     fetcher_factory=MeteorRadiantFetcher,
     auto_ip_location=True,
+    prediction_horizon_minutes=7 * 24 * 60,
     # ... remaining fields as usual
 )
 

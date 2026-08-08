@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
+from astronomy.forecast import FORECAST_HORIZONS, horizon_index
+
 
 class ControlsTab(QWidget):
     """Widget containing all controls for the astronomy tracker."""
@@ -136,8 +138,21 @@ class ControlsTab(QWidget):
         self.window.back_to_live_button.setObjectName("ghostButton")
         self.window.back_to_live_button.setEnabled(False)
 
+        # How far ahead the forecast reaches. Longer horizons sample at a wider
+        # step so the request stays the same size.
+        self.window.forecast_combo = QComboBox()
+        self.window.forecast_combo.setObjectName("forecastCombo")
+        self.window.forecast_combo.setFixedSize(96, 26)
+        for label, minutes in FORECAST_HORIZONS:
+            self.window.forecast_combo.addItem(label, minutes)
+        self.window.forecast_combo.setCurrentIndex(
+            horizon_index(self.window.prediction_horizon_minutes)
+        )
+
         row2.addWidget(self.window.timeline_status_label)
         row2.addWidget(self.window.timeline_slider, 1)
+        row2.addWidget(QLabel("Forecast"))
+        row2.addWidget(self.window.forecast_combo)
         row2.addWidget(self.window.back_to_live_button)
         outer.addLayout(row2)
 

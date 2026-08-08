@@ -191,3 +191,91 @@ def test_plot_wheel_zoom_requires_control_or_command_modifier() -> None:
     assert control_event.ignored is False
     assert command_event.ignored is False
     assert plot.view_box.original_calls == 2
+
+
+class _RangePlot:
+    """Minimal stand-in for the elevation PlotWidget's x-range interface."""
+
+    def __init__(self, x_min: float = 0.0, x_max: float = 3600.0) -> None:
+        self.x_range = (x_min, x_max)
+        self.padding_used: list[float | None] = []
+
+    def getViewBox(self):
+        return self
+
+    def viewRange(self):
+        return [list(self.x_range), [-90.0, 90.0]]
+
+    def setXRange(self, x_min: float, x_max: float, padding=None) -> None:
+        self.x_range = (x_min, x_max)
+        self.padding_used.append(padding)
+
+
+def _centering_window(x_min: float, x_max: float):
+    fake = type("FakeWindow", (), {})()
+    fake.elevation_plot = _RangePlot(x_min, x_max)
+    fake.plot_window_minutes = 60
+    fake._centered_timestamp = None
+    fake._center_plot_window = AstronomyTrackerWindow._center_plot_window.__get__(fake)
+    return fake
+
+
+def test_center_plot_window_puts_the_moment_in_the_middle() -> None:
+    fake = _centering_window(0.0, 3600.0)
+
+    fake._center_plot_window(1_000_000.0)
+
+    x_min, x_max = fake.elevation_plot.x_range
+    assert (x_min + x_max) / 2 == 1_000_000.0
+    # Padding must be suppressed or pyqtgraph widens the range and the moment
+    # stops being centred.
+    assert fake.elevation_plot.padding_used == [0]
+
+
+def test_center_plot_window_preserves_the_zoom_the_user_chose() -> None:
+    # A six-hour view stays six hours wide when it slides to a new moment.
+    fake = _centering_window(0.0, 6 * 3600.0)
+
+    fake._center_plot_window(1_000_000.0)
+
+    x_min, x_max = fake.elevation_plot.x_range
+    assert x_max - x_min == 6 * 3600.0
+    assert (x_min + x_max) / 2 == 1_000_000.0
+
+
+def test_center_plot_window_is_unaffected_by_a_long_forecast() -> None:
+    # The regression this guards: a forecast running weeks ahead used to drag
+    # the auto-ranged x axis with it, shrinking the live trace to a sliver.
+    fake = _centering_window(0.0, 3600.0)
+    live = 1_000_000.0
+
+    fake._center_plot_window(live)
+    x_min, x_max = fake.elevation_plot.x_range
+
+    assert x_max - x_min == 3600.0
+    assert x_min < live < x_max
+
+
+def test_center_plot_window_falls_back_on_a_degenerate_range() -> None:
+    for x_min, x_max in ((5.0, 5.0), (10.0, 0.0), (float("nan"), float("nan"))):
+        fake = _centering_window(x_min, x_max)
+        fake._center_plot_window(1_000_000.0)
+        span_min, span_max = fake.elevation_plot.x_range
+        assert span_max - span_min == 60 * 60.0
+        assert (span_min + span_max) / 2 == 1_000_000.0
+
+
+def test_reset_plot_time_window_returns_to_the_default_span() -> None:
+    fake = _centering_window(0.0, 6 * 3600.0)
+    fake._reset_plot_time_window = AstronomyTrackerWindow._reset_plot_time_window.__get__(
+        fake
+    )
+
+    fake._center_plot_window(1_000_000.0)
+    assert fake._centered_timestamp == 1_000_000.0
+
+    fake._reset_plot_time_window()
+    x_min, x_max = fake.elevation_plot.x_range
+    assert x_max - x_min == 60 * 60.0
+    # Reset changes the span but keeps looking at the same moment.
+    assert (x_min + x_max) / 2 == 1_000_000.0

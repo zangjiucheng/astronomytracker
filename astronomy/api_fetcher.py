@@ -83,6 +83,11 @@ def build_observer_range_params(
 
 
 class HorizonsFetcher:
+    # Upper bound on the rows a single range request should ask for. Callers
+    # widen the step size rather than the row count when a forecast reaches
+    # further out, so a long horizon does not turn into a huge slow query.
+    MAX_RANGE_SAMPLES = 500
+
     def __init__(self, timeout_sec: int = 30, retries: int = 3):
         self.timeout_sec = timeout_sec
         self.retries = retries
@@ -233,7 +238,10 @@ class HorizonsFetcher:
                 "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,"
                 "wind_speed_10m,visibility"
             ),
-            "forecast_days": "2",
+            # Open-Meteo's maximum. Forecasts can now run well past a day, and
+            # samples beyond this range are scored without weather rather than
+            # with stale present-day conditions.
+            "forecast_days": "16",
         }
 
         response = self.session.get(
